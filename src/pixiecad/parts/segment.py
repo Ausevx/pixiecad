@@ -175,6 +175,60 @@ def _submesh(mesh: trimesh.Trimesh, face_mask: np.ndarray) -> trimesh.Trimesh | 
     return sub if isinstance(sub, trimesh.Trimesh) and len(sub.faces) else None
 
 
+def parts_from_labels(
+    mesh: trimesh.Trimesh,
+    face_labels: np.ndarray,
+    *,
+    max_parts: int = 8,
+    min_area_frac: float = DEFAULT_MIN_AREA_FRAC,
+    method: str = "semantic",
+) -> list[Part]:
+    """Build Parts from a per-face label array.
+
+    The bridge between semantic segmentation and the rest of S5: everything
+    downstream (budgets, naming, export) consumes Parts, and this keeps the
+    debris filtering and largest-first ordering identical to the geometric
+    paths so a semantic run is not subtly different in shape.
+    """
+    if len(face_labels) != len(mesh.faces):
+        raise ValueError(
+            f"got {len(face_labels)} labels for {len(mesh.faces)} faces"
+        )
+
+    total_area = float(mesh.area) or 1.0
+    min_area = total_area * min_area_frac
+
+    chunks: list[trimesh.Trimesh] = []
+    for label in np.unique(face_labels):
+        if label < 0:
+            continue
+        sub = _submesh(mesh, face_labels == label)
+        if sub is not None and len(sub.faces) >= MIN_FACES_PER_PART and sub.area >= min_area:
+            chunks.append(sub)
+
+    if not chunks:
+        return _to_parts([mesh], "whole")
+
+    chunks.sort(key=lambda m: float(m.area), reverse=True)
+    return _to_parts(chunks[:max_parts], method)
+
+
+def _to_parts(chunks: list[trimesh.Trimesh], method: str) -> list[Part]:
+    return [
+        Part(
+            index=i,
+            mesh=chunk,
+            n_faces=len(chunk.faces),
+            volume=float(abs(chunk.volume)),
+            area=float(chunk.area),
+            centroid=tuple(float(v) for v in chunk.centroid),
+            extents=tuple(float(v) for v in chunk.extents),
+            method=method,
+        )
+        for i, chunk in enumerate(chunks)
+    ]
+
+
 def split_parts(
     mesh: trimesh.Trimesh,
     *,
@@ -226,16 +280,4 @@ def split_parts(
     chunks.sort(key=lambda m: float(m.area), reverse=True)
     chunks = chunks[:max_parts]
 
-    return [
-        Part(
-            index=i,
-            mesh=chunk,
-            n_faces=len(chunk.faces),
-            volume=float(abs(chunk.volume)),
-            area=float(chunk.area),
-            centroid=tuple(float(v) for v in chunk.centroid),
-            extents=tuple(float(v) for v in chunk.extents),
-            method=used,
-        )
-        for i, chunk in enumerate(chunks)
-    ]
+    return _to_parts(chunks, used)
