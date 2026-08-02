@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PixieCAD Web Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --text: #f8fafc;
+      --text-dim: #94a3b8;
+      --border: #334155;
+      --success: #22c55e;
+      --warning: #eab308;
+      --danger: #ef4444;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 1.5rem;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    header h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 350px 1fr 380px;
+      gap: 1.5rem;
+    }
+
+    @media (max-width: 1200px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .card-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.5rem;
+
+    }
+
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: 0.5rem;
+      padding: 1.5rem 1rem;
+      text-align: center;
+      cursor: pointer;
+      transition: background-color 0.2s, border-color 0.2s;
+    }
+
+    .dropzone:hover, .dropzone.dragover {
+      border-color: var(--accent);
+      background-color: rgba(59, 130, 246, 0.05);
+    }
+
+    .dropzone input {
+      display: none;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .form-group label {
+      font-size: 0.85rem;
+      color: var(--text-dim);
+    }
+
+    .form-control {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 0.375rem;
+      padding: 0.5rem 0.75rem;
+      color: var(--text);
+      font-size: 0.9rem;
+      width: 100%;
+    }
+
+    .form-control:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .btn {
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 0.375rem;
+      padding: 0.6rem 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      width: 100%;
+      text-align: center;
+    }
+
+    .btn:hover {
+      background: var(--accent-hover);
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .job-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      max-height: 250px;
+      overflow-y: auto;
+    }
+
+    .job-item {
+      padding: 0.75rem;
+      border-radius: 0.375rem;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .job-item.selected {
+      border-color: var(--accent);
+    }
+
+    .badge {
+      font-size: 0.75rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 9999px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .badge-queued { background: #475569; color: #f8fafc; }
+    .badge-running { background: #0284c7; color: #f8fafc; }
+    .badge-done { background: #15803d; color: #f8fafc; }
+    .badge-failed { background: #b91c1c; color: #f8fafc; }
+
+    #viewer-container {
+      width: 100%;
+      height: 450px;
+      background: #000;
+      border-radius: 0.5rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    #viewer-placeholder {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      color: var(--text-dim);
+      font-size: 0.95rem;
+      text-align: center;
+      padding: 1rem;
+    }
+
+    .slider-container {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding: 0.75rem;
+      background: #0f172a;
+      border-radius: 0.375rem;
+    }
+
+    .slider-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      color: var(--text-dim);
+    }
+
+    .log-panel {
+      font-family: monospace;
+      font-size: 0.8rem;
+      background: #090d16;
+      border: 1px solid var(--border);
+      border-radius: 0.375rem;
+      padding: 0.75rem;
+      height: 200px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      color: #38bdf8;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+
+    th, td {
+      padding: 0.5rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      color: var(--text-dim);
+      font-weight: 600;
+    }
+
+    .note {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      font-style: italic;
+    }
+  </style>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <header>
+    <h1><span>✨</span> PixieCAD Local Dashboard</h1>
+    <span class="badge badge-done" id="system-status">System Ready</span>
+  </header>
+
+  <div class="grid">
+    <!-- Left Column: New Job & Jobs List -->
+    <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+      <div class="card">
+        <h2 class="card-title">New 3D Reconstruction</h2>
+        <form id="upload-form">
+          <div class="dropzone" id="dropzone">
+            <p id="drop-text">📸 Drop photos here or click to browse</p>
+            <input type="file" id="file-input" name="files" multiple accept="image/*">
+          </div>
+
+          <div style="margin-top: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
+            <div class="form-group">
+              <label for="job-name">Object Name</label>
+              <input type="text" id="job-name" name="name" class="form-control" value="my_model">
+            </div>
+
+            <div class="form-group">
+              <label for="target-faces">Target Triangles</label>
+              <input type="number" id="target-faces" name="target_faces" class="form-control" value="20000" min="100" max="200000">
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem;">
+              <div class="form-group">
+                <label for="dim-l">Length</label>
+                <input type="text" id="dim-l" name="length" class="form-control" placeholder="e.g. 4.5m">
+              </div>
+              <div class="form-group">
+                <label for="dim-w">Width</label>
+                <input type="text" id="dim-w" name="width" class="form-control" placeholder="e.g. 2m">
+              </div>
+              <div class="form-group">
+                <label for="dim-h">Height</label>
+                <input type="text" id="dim-h" name="height" class="form-control" placeholder="e.g. 1.2m">
+              </div>
+            </div>
+
+            <button type="submit" class="btn" id="submit-btn" style="margin-top: 0.5rem;">Start Pipeline</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Jobs</h2>
+        <div class="job-list" id="job-list">
+          <p style="color: var(--text-dim); font-size: 0.85rem;">No jobs yet.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center Column: 3D Model Viewer -->
+    <div class="card">
+      <h2 class="card-title">3D Model Viewer</h2>
+      <div id="viewer-container">
+        <div id="viewer-placeholder">No GLB model loaded. Select a completed job to view.</div>
+      </div>
+
+      <div class="slider-container">
+        <div class="slider-header">
+          <span>Polygon Budget</span>
+          <span id="slider-val">20,000 triangles</span>
+        </div>
+        <input type="range" id="poly-slider" min="100" max="200000" step="500" value="20000" class="form-control">
+        <button class="btn" id="optimize-btn" style="margin-top: 0.5rem;">Re-optimize Mesh</button>
+      </div>
+    </div>
+
+    <!-- Right Column: Logs & Cloud -->
+    <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+      <div class="card">
+        <h2 class="card-title">Pipeline Log Stream</h2>
+        <div class="log-panel" id="log-panel">Select a job to view logs...</div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Google Cloud Status</h2>
+        <div id="cloud-panel" style="font-size: 0.85rem; display: flex; flex-direction: column; gap: 0.75rem;">
+          <p style="color: var(--text-dim);">Checking cloud status...</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+    let selectedJobId = null;
+    let selectedFiles = [];
+    let scene, camera, renderer, controls, currentMesh;
+
+    // 3D Scene Setup
+    function init3D() {
+      const container = document.getElementById('viewer-container');
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0f172a);
+
+      camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
+      camera.position.set(2, 2, 3);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      renderer.setPixelRatio(window.devicePixelRatio);
+      container.appendChild(renderer.domElement);
+
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+
+      const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
+      hemiLight.position.set(0, 20, 0);
+      scene.add(hemiLight);
+
+      const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+      dirLight.position.set(10, 20, 15);
+      scene.add(dirLight);
+
+      window.addEventListener('resize', () => {
+        camera.aspect = container.clientWidth / container.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(container.clientWidth, container.clientHeight);
+      });
+
+      function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+      }
+      animate();
+    }
+
+    function loadGLB(url) {
+      if (!url) return;
+      const loader = new GLTFLoader();
+      document.getElementById('viewer-placeholder').innerText = 'Loading 3D model...';
+      document.getElementById('viewer-placeholder').style.display = 'flex';
+
+      loader.load(url, (gltf) => {
+        if (currentMesh) scene.remove(currentMesh);
+        currentMesh = gltf.scene;
+        scene.add(currentMesh);
+
+        // Auto-fit camera to bounding sphere
+        const box = new THREE.Box3().setFromObject(currentMesh);
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const radius = maxDim / 2 || 1;
+
+        controls.target.copy(center);
+        const fov = camera.fov * (Math.PI / 180);
+        let cameraZ = Math.abs(radius / Math.sin(fov / 2)) * 1.8;
+        camera.position.set(center.x + cameraZ, center.y + cameraZ * 0.5, center.z + cameraZ);
+        camera.lookAt(center);
+        controls.update();
+
+        document.getElementById('viewer-placeholder').style.display = 'none';
+      }, undefined, (err) => {
+        document.getElementById('viewer-placeholder').innerText = 'Failed to load GLB model.';
+      });
+    }
+
+    // UI Drag & Drop
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('file-input');
+    const dropText = document.getElementById('drop-text');
+
+    dropzone.addEventListener('click', () => fileInput.click());
+    dropzone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropzone.classList.add('dragover');
+    });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+    dropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropzone.classList.remove('dragover');
+      selectedFiles = Array.from(e.dataTransfer.files);
+      updateDropText();
+    });
+    fileInput.addEventListener('change', () => {
+      selectedFiles = Array.from(fileInput.files);
+      updateDropText();
+    });
+
+    function updateDropText() {
+      if (selectedFiles.length > 0) {
+        dropText.innerText = `📸 ${selectedFiles.length} file(s) selected`;
+      } else {
+        dropText.innerText = '📸 Drop photos here or click to browse';
+      }
+    }
+
+    // Form Submit
+    document.getElementById('upload-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      formData.delete('files');
+      selectedFiles.forEach(file => formData.append('files', file));
+
+      const submitBtn = document.getElementById('submit-btn');
+      submitBtn.disabled = true;
+      submitBtn.innerText = 'Uploading...';
+
+      try {
+        const res = await fetch('/api/jobs', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        if (data.job_id) {
+          selectedJobId = data.job_id;
+          fetchJobs();
+        }
+      } catch (err) {
+        alert('Failed to submit job');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerText = 'Start Pipeline';
+      }
+    });
+
+    // Slider UI
+    const slider = document.getElementById('poly-slider');
+    const sliderVal = document.getElementById('slider-val');
+    slider.addEventListener('input', () => {
+      sliderVal.innerText = `${parseInt(slider.value).toLocaleString()} triangles`;
+    });
+
+    document.getElementById('optimize-btn').addEventListener('click', async () => {
+      if (!selectedJobId) {
+        alert('Please select a job first.');
+        return;
+      }
+      const optBtn = document.getElementById('optimize-btn');
+      optBtn.disabled = true;
+      optBtn.innerText = 'Optimizing...';
+
+      try {
+        const res = await fetch(`/api/jobs/${selectedJobId}/optimize`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target_faces: parseInt(slider.value) })
+        });
+        if (res.status === 409) {
+          const err = await res.json();
+          alert(err.detail || 'Dense mesh not found for this job.');
+        } else if (res.ok) {
+          const data = await res.json();
+          if (data.glb_url) {
+            loadGLB(data.glb_url);
+          }
+        }
+      } catch (err) {
+        alert('Optimization request failed');
+      } finally {
+        optBtn.disabled = false;
+        optBtn.innerText = 'Re-optimize Mesh';
+      }
+    });
+
+    // Poll Jobs & Cloud
+    async function fetchJobs() {
+      try {
+        const res = await fetch('/api/jobs');
+        if (!res.ok) return;
+        const jobs = await res.json();
+        const container = document.getElementById('job-list');
+        if (jobs.length === 0) {
+          container.innerHTML = '<p style="color: var(--text-dim); font-size: 0.85rem;">No jobs yet.</p>';
+          return;
+        }
+
+        container.innerHTML = jobs.map(j => `
+          <div class="job-item ${j.job_id === selectedJobId ? 'selected' : ''}" data-id="${j.job_id}">
+            <div>
+              <div style="font-weight: 600;">${j.name}</div>
+              <div style="font-size: 0.75rem; color: var(--text-dim);">${j.job_id}</div>
+            </div>
+            <span class="badge badge-${j.status}">${j.status}</span>
+          </div>
+        `).join('');
+
+        document.querySelectorAll('.job-item').forEach(el => {
+          el.addEventListener('click', () => {
+            selectedJobId = el.dataset.id;
+            fetchJobDetails(selectedJobId);
+            fetchJobs();
+          });
+        });
+
+        if (selectedJobId) {
+          fetchJobDetails(selectedJobId);
+        }
+      } catch (err) {}
+    }
+
+    async function fetchJobDetails(jobId) {
+      try {
+        const res = await fetch(`/api/jobs/${jobId}`);
+        if (!res.ok) return;
+        const job = await res.json();
+        const logPanel = document.getElementById('log-panel');
+        logPanel.innerText = (job.log || []).join('\n');
+        logPanel.scrollTop = logPanel.scrollHeight;
+
+        if (job.glb_url && !currentMesh) {
+          loadGLB(job.glb_url);
+        }
+      } catch (err) {}
+    }
+
+    async function fetchCloudStatus() {
+      try {
+        const res = await fetch('/api/cloud');
+        if (!res.ok) return;
+        const data = await res.json();
+        const panel = document.getElementById('cloud-panel');
+
+        if (!data.available) {
+          panel.innerHTML = `
+            <div style="color: var(--warning);">⚠️ Cloud module unavailable</div>
+            <div class="note">${data.reason || 'Cloud telemetry not installed.'}</div>
+          `;
+          return;
+        }
+
+        const gc = data.gcloud || {};
+        const instances = data.instances || [];
+
+        panel.innerHTML = `
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; background: #0f172a; padding: 0.75rem; border-radius: 0.375rem;">
+            <div><strong>gcloud:</strong> ${gc.installed ? 'Installed' : 'Missing'}</div>
+            <div><strong>Version:</strong> ${gc.version || 'N/A'}</div>
+            <div><strong>Account:</strong> ${gc.account || 'N/A'}</div>
+            <div><strong>Project:</strong> ${gc.project || 'N/A'}</div>
+          </div>
+
+          <div><strong>Instances (${instances.length})</strong></div>
+          <div style="overflow-x: auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th><th>Zone</th><th>Type</th><th>Status</th><th>Cost ($)</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${instances.length ? instances.map(i => `
+                  <tr>
+                    <td>${i.name}</td>
+                    <td>${i.zone}</td>
+                    <td>${i.machine_type}</td>
+                    <td><span class="badge badge-${i.status === 'RUNNING' ? 'done' : 'queued'}">${i.status}</span></td>
+                    <td>$${(i.estimated_cost_usd || 0).toFixed(2)}</td>
+                  </tr>
+                `).join('') : '<tr><td colspan="5" style="text-align:center; color: var(--text-dim);">No active compute instances</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+
+          <div style="display: flex; justify-space-between; align-items: center; background: #0f172a; padding: 0.75rem; border-radius: 0.375rem;">
+            <span>Estimated Cost:</span>
+            <strong style="color: var(--success); font-size: 1rem;">$${(data.total_estimated_cost_usd || 0).toFixed(2)}</strong>
+          </div>
+
+          ${data.console_billing_url ? `
+            <a href="${data.console_billing_url}" target="_blank" style="color: var(--accent); font-size: 0.85rem;">Open Google Cloud Billing Console ↗</a>
+          ` : ''}
+          <div class="note">Note: Account credit balance is only visible in the Google Cloud Console.</div>
+        `;
+      } catch (err) {}
+    }
+
+    // Init
+    init3D();
+    fetchJobs();
+    fetchCloudStatus();
+    setInterval(fetchJobs, 1500);
+    setInterval(fetchCloudStatus, 15000);
+  </script>
+</body>
+</html>

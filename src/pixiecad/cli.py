@@ -165,5 +165,102 @@ def optimize(
     typer.echo(f"wrote {path} ({path.stat().st_size / 1024:.0f} KB)")
 
 
+@app.command()
+def build(
+    photos: Path = typer.Argument(..., exists=True, file_okay=False, help="Photo directory"),
+    workspace: Path = typer.Option(..., "--workspace", "-w", help="Workspace directory"),
+    host: str = typer.Option(None, help="SSH host for the GPU dense stage (omit to skip dense)"),
+    bake: bool = typer.Option(True, help="Bake a normal map from the dense mesh"),
+    normal_res: int = typer.Option(1024, help="Normal map resolution (px)"),
+):
+    """Run the whole pipeline: photos in, budgeted .glb out."""
+    from .executors import SSHExecutor
+    from .pipeline import run_build
+
+    executor = SSHExecutor(host) if host else None
+    result = run_build(
+        photos, workspace, executor=executor, dense=bool(host),
+        bake=bake, normal_res=normal_res,
+    )
+
+    typer.echo(f"regime: {result.regime.value}")
+    for line in result.summary_lines():
+        typer.echo("  " + line)
+    for w in result.warnings:
+        typer.echo(f"⚠ {w}")
+    if result.scale_applied:
+        typer.echo(f"scale: ×{result.scale_applied:.4f} (metric)")
+    if result.glb_path:
+        typer.echo(f"✓ {result.glb_path} ({result.faces} faces)")
+    else:
+        typer.echo("no model produced — see stage statuses above", err=True)
+        raise typer.Exit(1)
+
+
+@app.command()
+def drawings(
+    mesh_file: Path = typer.Argument(..., exists=True, help="Mesh file (.glb/.ply/.obj/.stl)"),
+    out_dir: Path = typer.Option("drawings", "--out", "-o", help="Output directory"),
+    workspace: Path = typer.Option(None, "--workspace", "-w", help="Workspace, for dimensions"),
+    size: int = typer.Option(800, help="Drawing size (px)"),
+):
+    """S7: orthographic front/side/top SVG drawings, annotated with dimensions."""
+    import trimesh
+
+    from .meshops import render_all, save_views
+
+    mesh = trimesh.load(mesh_file, force="mesh", process=False)
+    dims = Workspace.open(workspace).spec().dimensions if workspace else None
+    views = render_all(mesh, dimensions=dims, size_px=size)
+    for path in save_views(views, out_dir):
+        typer.echo(f"wrote {path}")
+
+
+@app.command()
+def serve(
+    root: Path = typer.Option("jobs", "--root", "-r", help="Directory for job workspaces"),
+    port: int = typer.Option(8000, help="Port"),
+    host_addr: str = typer.Option("127.0.0.1", "--host", help="Bind address"),
+):
+    """Launch the local web dashboard."""
+    import uvicorn
+
+    from .web import create_app
+
+    root.mkdir(parents=True, exist_ok=True)
+    typer.echo(f"pixiecad dashboard → http://{host_addr}:{port}")
+    uvicorn.run(create_app(root), host=host_addr, port=port, log_level="warning")
+
+
+@app.command()
+def cloud(
+    watch: bool = typer.Option(False, help="Refresh every 10s until interrupted"),
+):
+    """Show gcloud status, running GPU instances, and estimated session spend."""
+    import time as _time
+
+    from .cloud import snapshot
+
+    while True:
+        snap = snapshot()
+        g = snap.gcloud
+        if not g.installed:
+            typer.echo("gcloud: not installed", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"gcloud {g.version or '?'} | {g.account or 'not authenticated'} | project {g.project or '-'}")
+        if not snap.instances:
+            typer.echo("no instances running")
+        for i in snap.instances:
+            cost = f"${i.estimated_cost_usd:.2f}" if i.estimated_cost_usd is not None else "—"
+            up = f"{i.uptime_hours:.2f}h" if i.uptime_hours is not None else "—"
+            kind = "spot" if i.preemptible else "on-demand"
+            typer.echo(f"  {i.name} [{i.status}] {i.machine_type} {i.accelerator or 'no gpu'} {kind} up {up} ≈{cost}")
+        typer.echo(f"estimated spend this session: ${snap.total_estimated_cost_usd:.2f}")
+        typer.echo(f"credit balance is console-only: {snap.console_billing_url}")
+        if not watch:
+            break
+        _time.sleep(10)
+
+
 if __name__ == "__main__":
     app()
