@@ -29,6 +29,10 @@ def main() -> int:
     ap.add_argument("--resolution", type=int, default=512)
     args = ap.parse_args()
 
+    # Must precede the pipeline import: the compiled rasterizer links against
+    # libc10.so and only resolves once torch has been loaded.
+    import torch  # noqa: F401
+
     from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
 
     conf = Hunyuan3DPaintConfig(args.max_views, args.resolution)
