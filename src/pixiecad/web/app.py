@@ -593,6 +593,33 @@ def create_app(root: Path) -> FastAPI:
             )
         return FileResponse(web, media_type="model/gltf-binary", filename="model_web.glb")
 
+    @app.get("/api/cloud/inventory")
+    def cloud_inventory():
+        """Everything GCP bills this project for, with console deep links.
+
+        Estimated run-rate, not your actual invoice: real per-resource cost
+        needs Cloud Billing export to BigQuery. This answers the question
+        people actually ask -- what am I paying to leave things lying around.
+        """
+        try:
+            from pixiecad.cloud import gcloud_status, list_billable
+
+            status = gcloud_status()
+            if not status.installed:
+                return {"available": False, "reason": "gcloud CLI not installed", "resources": []}
+            resources = [dataclasses.asdict(r) for r in list_billable(status.project)]
+            known = [r["est_usd_per_month"] for r in resources if r["est_usd_per_month"]]
+            return {
+                "available": True,
+                "project": status.project,
+                "resources": resources,
+                "est_total_usd_per_month": round(sum(known), 2),
+                "unmeasured": sum(1 for r in resources if r["est_usd_per_month"] is None),
+                "console_billing_url": "https://console.cloud.google.com/billing",
+            }
+        except Exception as exc:
+            return {"available": False, "reason": str(exc), "resources": []}
+
     @app.get("/api/gpu-options")
     def gpu_options(texture: bool = True, semantic: bool = True):
         """Hardware choices with measured-where-possible time and cost."""

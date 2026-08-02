@@ -284,3 +284,148 @@ def snapshot() -> CloudSnapshot:
             console_billing_url=CONSOLE_BILLING_URL,
             checked_at=now_iso,
         )
+
+
+# --- Billable resource inventory -------------------------------------------
+#
+# A running GPU VM is the obvious expense and the one the dashboard already
+# tracked. The costs that actually surprise people are the quiet ones: a disk
+# left behind by a deleted instance, a machine image nobody remembers baking,
+# a bucket of old runs. Those bill every month whether or not anything runs.
+#
+# Rates are indicative GCP list prices and are labelled as estimates
+# everywhere they surface. This is a run-rate model, not your bill: real
+# per-resource cost needs Cloud Billing export to BigQuery, which is a
+# heavier setup. The number here is for "what am I paying to leave this
+# lying around", which is the question that actually gets asked.
+
+DISK_USD_PER_GB_MONTH = {
+    "pd-standard": 0.04,
+    "pd-balanced": 0.10,
+    "pd-ssd": 0.17,
+}
+MACHINE_IMAGE_USD_PER_GB_MONTH = 0.05
+BUCKET_USD_PER_GB_MONTH = 0.020  # standard, single region
+
+CONSOLE = "https://console.cloud.google.com"
+
+
+@dataclass
+class BillableResource:
+    kind: str  # instance | disk | machine-image | bucket
+    name: str
+    location: str
+    detail: str
+    size_gb: float | None
+    est_usd_per_month: float | None
+    console_url: str
+    # What to do about it, in the user's terms -- an inventory that does not
+    # say "this is safe to delete" just creates anxiety.
+    advice: str
+
+
+def _json(cmd: list[str], timeout_s: float = 30) -> list:
+    import json as _json_mod
+
+    res = _run(cmd, timeout_s=timeout_s)
+    if res.returncode != 0 or not (res.stdout or "").strip():
+        return []
+    try:
+        data = _json_mod.loads(res.stdout)
+        return data if isinstance(data, list) else [data]
+    except Exception:
+        return []
+
+
+def list_billable(project: str | None = None) -> list[BillableResource]:
+    """Every GCP resource this project bills for, with a console deep link."""
+    out: list[BillableResource] = []
+    proj = project or ""
+    suffix = f"?project={proj}" if proj else ""
+
+    for inst in _json(["gcloud", "compute", "instances", "list", "--format=json"]):
+        zone = str(inst.get("zone", "")).rsplit("/", 1)[-1]
+        name = inst.get("name", "?")
+        status = inst.get("status", "?")
+        accel = (inst.get("guestAccelerators") or [{}])[0].get("acceleratorType", "")
+        accel = str(accel).rsplit("/", 1)[-1]
+        spot = (inst.get("scheduling") or {}).get("provisioningModel") == "SPOT"
+        rate = (SPOT_USD_PER_HOUR if spot else ONDEMAND_USD_PER_HOUR).get(accel)
+        # A stopped instance bills for its disk only, which is why "turned
+        # off" is not the same as "free".
+        monthly = round(rate * 730, 2) if (rate and status == "RUNNING") else None
+        out.append(
+            BillableResource(
+                kind="instance",
+                name=name,
+                location=zone,
+                detail=f"{str(inst.get('machineType','')).rsplit('/',1)[-1]}"
+                + (f" + {accel}" if accel else "")
+                + f" [{status}{', spot' if spot else ''}]",
+                size_gb=None,
+                est_usd_per_month=monthly,
+                console_url=f"{CONSOLE}/compute/instancesDetail/zones/{zone}/instances/{name}{suffix}",
+                advice=(
+                    "RUNNING and billing by the hour. Delete when idle."
+                    if status == "RUNNING"
+                    else "Stopped: no GPU charge, but its disk still bills."
+                ),
+            )
+        )
+
+    for disk in _json(["gcloud", "compute", "disks", "list", "--format=json"]):
+        zone = str(disk.get("zone") or disk.get("region", "")).rsplit("/", 1)[-1]
+        name = disk.get("name", "?")
+        size = float(disk.get("sizeGb", 0) or 0)
+        dtype = str(disk.get("type", "")).rsplit("/", 1)[-1]
+        attached = bool(disk.get("users"))
+        rate = DISK_USD_PER_GB_MONTH.get(dtype, 0.10)
+        out.append(
+            BillableResource(
+                kind="disk",
+                name=name,
+                location=zone,
+                detail=f"{dtype}, {'attached' if attached else 'UNATTACHED'}",
+                size_gb=size,
+                est_usd_per_month=round(size * rate, 2),
+                console_url=f"{CONSOLE}/compute/disksDetail/zones/{zone}/disks/{name}{suffix}",
+                advice=(
+                    "In use by an instance."
+                    if attached
+                    else "Not attached to anything and still billing. Usually safe to delete."
+                ),
+            )
+        )
+
+    for image in _json(["gcloud", "compute", "machine-images", "list", "--format=json"]):
+        name = image.get("name", "?")
+        size = float(image.get("totalStorageBytes", 0) or 0) / 1e9
+        out.append(
+            BillableResource(
+                kind="machine-image",
+                name=name,
+                location="global",
+                detail="prebuilt worker template",
+                size_gb=round(size, 1),
+                est_usd_per_month=round(size * MACHINE_IMAGE_USD_PER_GB_MONTH, 2),
+                console_url=f"{CONSOLE}/compute/machineImages/details/{name}{suffix}",
+                advice="Delete if you no longer want fast VM launches.",
+            )
+        )
+
+    for bucket in _json(["gcloud", "storage", "buckets", "list", "--format=json"], timeout_s=40):
+        name = str(bucket.get("name") or bucket.get("id", "?")).replace("gs://", "")
+        out.append(
+            BillableResource(
+                kind="bucket",
+                name=name,
+                location=str(bucket.get("location", "")),
+                detail=str(bucket.get("storageClass", "")),
+                size_gb=None,  # needs an object scan; too slow for a page load
+                est_usd_per_month=None,
+                console_url=f"{CONSOLE}/storage/browser/{name}{suffix}",
+                advice=f"Size not measured (needs a scan). ~${BUCKET_USD_PER_GB_MONTH}/GB-month.",
+            )
+        )
+
+    return out

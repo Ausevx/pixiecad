@@ -344,3 +344,49 @@ class TestGPUOptions:
 
     def test_provision_status_starts_empty(self, client):
         assert client.get("/api/cloud/provision").json() == {}
+
+
+class TestCloudInventory:
+    def test_endpoint_never_raises(self, client):
+        """Runs on machines with no gcloud; must degrade, not 500."""
+        d = client.get("/api/cloud/inventory").json()
+        assert "available" in d and "resources" in d
+
+    def test_resources_carry_console_links_and_advice(self):
+        """An inventory that cannot say what is safe to delete just worries people."""
+        from pixiecad.cloud import BillableResource
+
+        r = BillableResource(
+            kind="disk", name="d", location="z", detail="pd-balanced, UNATTACHED",
+            size_gb=200.0, est_usd_per_month=20.0,
+            console_url="https://console.cloud.google.com/compute/disksDetail/zones/z/disks/d",
+            advice="Not attached to anything and still billing.",
+        )
+        assert r.console_url.startswith("https://console.cloud.google.com/")
+        assert r.advice
+
+    def test_stopped_instance_is_not_billed_at_the_gpu_rate(self):
+        """'Turned off' is not free, but it is not the hourly GPU rate either."""
+        import pixiecad.cloud as cloud
+
+        calls = {"n": 0}
+
+        def fake_json(cmd, timeout_s=30):
+            calls["n"] += 1
+            if "instances" in cmd:
+                return [{
+                    "name": "vm", "zone": "z/z1", "status": "TERMINATED",
+                    "machineType": "m/g2-standard-16",
+                    "guestAccelerators": [{"acceleratorType": "a/nvidia-l4"}],
+                    "scheduling": {"provisioningModel": "SPOT"},
+                }]
+            return []
+
+        original = cloud._json
+        cloud._json = fake_json
+        try:
+            resources = cloud.list_billable("p")
+        finally:
+            cloud._json = original
+        assert resources[0].est_usd_per_month is None
+        assert "disk still bills" in resources[0].advice

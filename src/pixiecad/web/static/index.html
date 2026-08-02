@@ -387,6 +387,15 @@
             </div>
 
             <div class="form-group">
+              <label style="display:flex;justify-content:space-between;align-items:center;">
+                <span>GCP spend (estimated run-rate)</span>
+                <button type="button" class="btn" id="inventory-btn"
+                        style="padding:0.15rem 0.6rem;font-size:0.8em;">Refresh</button>
+              </label>
+              <div id="inventory" style="font-size:0.85em;opacity:0.9;">Click refresh to list billable resources.</div>
+            </div>
+
+            <div class="form-group">
               <label for="gpu-host">GPU host (optional)</label>
               <input type="text" id="gpu-host" name="gpu_host" class="form-control"
                      placeholder="name.zone.project, e.g. pixiecad-tex.asia-southeast1-b.my-project">
@@ -618,6 +627,36 @@
       });
       status.textContent = (await res.json()).ok ? 'VM deleted. Billing stopped.' : 'Delete failed.';
     });
+
+    // Billable inventory. Deliberately manual: each refresh shells out to
+    // gcloud several times, so polling it would be slow and pointless.
+    async function loadInventory() {
+      const box = document.getElementById('inventory');
+      box.textContent = 'Checking gcloud...';
+      let d;
+      try { d = await (await fetch('/api/cloud/inventory')).json(); }
+      catch (e) { box.textContent = 'Could not reach the server.'; return; }
+      if (!d.available) { box.textContent = 'Unavailable: ' + (d.reason || 'unknown'); return; }
+      if (!d.resources.length) { box.innerHTML = '<div>Nothing billable in <b>' + d.project + '</b>.</div>'; return; }
+      const rows = d.resources.map(r => {
+        const cost = r.est_usd_per_month == null
+          ? '<span style="opacity:0.6;">not measured</span>'
+          : '$' + r.est_usd_per_month.toFixed(2) + '/mo';
+        const size = r.size_gb ? (' &middot; ' + r.size_gb + ' GB') : '';
+        return '<div style="padding:0.35rem 0;border-bottom:1px solid rgba(255,255,255,0.08);">' +
+          '<div><a href="' + r.console_url + '" target="_blank" rel="noopener"><b>' + r.name + '</b></a>' +
+          ' <span style="opacity:0.65;">(' + r.kind + ')</span> &mdash; ' + cost + '</div>' +
+          '<div style="opacity:0.7;">' + r.detail + size + '</div>' +
+          '<div style="opacity:0.7;">' + r.advice + '</div></div>';
+      }).join('');
+      box.innerHTML = rows +
+        '<div style="margin-top:0.5rem;"><b>Estimated total: $' +
+        d.est_total_usd_per_month.toFixed(2) + '/month</b> if left as-is' +
+        (d.unmeasured ? ' (' + d.unmeasured + ' not measured)' : '') + '</div>' +
+        '<div style="opacity:0.7;margin-top:0.25rem;">Estimate from list prices, not your invoice. ' +
+        '<a href="' + d.console_billing_url + '" target="_blank" rel="noopener">Open GCP billing</a></div>';
+    }
+    document.getElementById('inventory-btn').addEventListener('click', loadInventory);
 
     loadGpuOptions();
 
