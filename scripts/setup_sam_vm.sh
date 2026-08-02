@@ -37,8 +37,10 @@ mkdir -p \$HOME/sam-build
 cat > \$HOME/sam-build/Dockerfile <<'DOCKEREOF'
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
+# git is needed at build time: segment-anything is not on PyPI, so pip has to
+# clone it. The runtime base image does not ship git, unlike the devel one.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libgl1 libglib2.0-0 \
+      git libgl1 libglib2.0-0 \
  && rm -rf /var/lib/apt/lists/*
 # runtime base, not devel: SAM ships no custom CUDA kernels, so there is
 # nothing to compile and the devel image would triple the pull for nothing.

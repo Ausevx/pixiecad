@@ -62,7 +62,15 @@ case "$WORKLOAD" in
     MACHINE="g2-standard-16"
     MAX_RUN=7200; GUARD_SLEEP=6600; DISK=200
     ;;
-  *) echo "unknown workload: $WORKLOAD (use colmap, trellis or hunyuan)" >&2; exit 2 ;;
+  sam)
+    # Segmentation only, and far lighter than the generative workloads: SAM
+    # ViT-H is 2.4 GB of weights with no custom kernels, so it runs on a T4
+    # and needs neither the 64 GB host nor the big disk. The image is built on
+    # the VM by scripts/setup_sam_vm.sh.
+    PULL_IMAGE=""
+    MAX_RUN=3600; GUARD_SLEEP=2700; DISK=100
+    ;;
+  *) echo "unknown workload: $WORKLOAD (use colmap, trellis, hunyuan or sam)" >&2; exit 2 ;;
 esac
 
 # The image family matters: 'common-cu124-*' does NOT exist. List current ones:
@@ -101,6 +109,19 @@ gcloud compute instances create "$NAME" \
   --metadata-from-file=startup-script="$STARTUP" \
   --metadata=install-nvidia-driver=True
 rm -f "$STARTUP"
+
+# The instance reports RUNNING before sshd accepts connections, so this step
+# used to fail with "Connection refused" and -- because gcloud's failure was
+# not fatal here -- left a VM with no docker at all, which only surfaced much
+# later as a confusing "docker: command not found" mid-job.
+echo "waiting for sshd ..."
+for _ in $(seq 1 30); do
+  if gcloud compute ssh "$NAME" --project="$PROJECT" --zone="$ZONE" --quiet \
+       --command=true >/dev/null 2>&1; then
+    break
+  fi
+  sleep 10
+done
 
 echo "installing docker + CUDA container runtime ..."
 # The Deep Learning VM image does NOT ship docker, despite having the NVIDIA

@@ -15,7 +15,7 @@ from pixiecad.parts.render import (
 )
 from pixiecad.parts.semantic import (
     SilhouetteSegmenter,
-    _agglomerate,
+    _felzenszwalb,
     segment_semantic,
 )
 
@@ -97,51 +97,67 @@ class TestRender:
         assert set(render.visible_faces.tolist()) <= set(range(n_near))
 
 
-class TestAgglomerate:
-    def test_merges_above_threshold_only(self):
-        sim = np.array([[0.0, 0.9, 0.0], [0.9, 0.0, 0.0], [0.0, 0.0, 0.0]])
-        labels = _agglomerate(sim, 0.35)
-        assert labels[0] == labels[1] != labels[2]
+class TestFelzenszwalb:
+    def test_size_penalty_prevents_one_region_swallowing_all(self):
+        """The failure this algorithm was brought in to fix.
 
-    def test_cannot_link_blocks_chaining_through_a_shared_view(self):
-        """Two masks separated by the segmenter in one view must stay apart.
-
-        Without the constraint, single linkage fuses all four through the 0.9
-        bridge between 1 and 2. Masks 0 and 3 both come from 'front', where the
-        segmenter called them distinct, so the merge must be refused.
+        A chain of four faces whose boundaries all cost the same non-zero
+        amount. Plain agglomerative merging absorbs the lot regardless; here
+        the k/area slack is far below that cost, so nothing may merge.
         """
-        sim = np.zeros((4, 4))
-        sim[0, 1] = sim[1, 0] = 0.95
-        sim[2, 3] = sim[3, 2] = 0.95
-        sim[1, 2] = sim[2, 1] = 0.6  # the bridge, weaker than either true pair
-        labels = _agglomerate(sim, 0.5, ["front", "left", "right", "front"])
+        adjacency = np.array([[0, 1], [1, 2], [2, 3]])
+        dissim = np.full(3, 0.5)
+        area = np.full(4, 0.25)
+        assert len(np.unique(_felzenszwalb(adjacency, dissim, area, 1e-9))) == 4
+        # Slack above the boundary cost (k/0.25 > 0.5) and it all merges.
+        assert len(np.unique(_felzenszwalb(adjacency, dissim, area, 1.0))) == 1
+
+    def test_larger_k_gives_coarser_segmentation(self):
+        adjacency = np.array([[0, 1], [1, 2], [2, 3]])
+        dissim = np.array([0.1, 0.9, 0.1])
+        area = np.full(4, 0.25)
+        fine = len(np.unique(_felzenszwalb(adjacency, dissim, area, 1e-6)))
+        coarse = len(np.unique(_felzenszwalb(adjacency, dissim, area, 10.0)))
+        assert coarse <= fine
+
+    def test_cuts_at_the_expensive_boundary(self):
+        """A strong disagreement must survive as a part boundary."""
+        adjacency = np.array([[0, 1], [1, 2], [2, 3]])
+        dissim = np.array([0.0, 100.0, 0.0])
+        area = np.full(4, 0.25)
+        labels = _felzenszwalb(adjacency, dissim, area, 0.01)
         assert labels[0] == labels[1]
         assert labels[2] == labels[3]
-        assert labels[0] != labels[3]
-
-    def test_chains_across_views_when_unconstrained(self):
-        """A part is linked around the object as a chain of overlapping views."""
-        sim = np.zeros((3, 3))
-        sim[0, 1] = sim[1, 0] = 0.9
-        sim[1, 2] = sim[2, 1] = 0.9
-        labels = _agglomerate(sim, 0.5, ["front", "left", "back"])
-        assert labels[0] == labels[1] == labels[2]
-
-    def test_empty_input(self):
-        assert len(_agglomerate(np.zeros((0, 0)), 0.35)) == 0
+        assert labels[1] != labels[2]
 
 
 class TestSegmentSemantic:
-    def test_separates_disjoint_objects(self):
+    def test_no_part_spans_disjoint_objects(self):
+        """The real invariant: a part never bridges two separate objects.
+
+        Not asserting exactly two clusters. ``max_parts`` is the part count the
+        user asked for, so subdividing two spheres into up to eight patches is
+        correct behaviour -- what would be wrong is a single part containing
+        surface from both spheres.
+        """
         mesh = _two_spheres()
-        result = segment_semantic(mesh, SilhouetteSegmenter(), resolution=128, up_axis="z")
-        assert result.n_clusters == 2
-        # Every face labelled, and the split matches the actual geometry.
+        result = segment_semantic(
+            mesh, SilhouetteSegmenter(), resolution=128, up_axis="z", max_parts=8
+        )
         assert (result.face_labels >= 0).all()
+        assert result.n_clusters <= 8
         left = mesh.triangles_center[:, 0] < 3.0
         for cluster in np.unique(result.face_labels):
             sel = result.face_labels == cluster
-            assert left[sel].all() or (~left[sel]).all()
+            assert left[sel].all() or (~left[sel]).all(), "part spans both spheres"
+
+    def test_respects_max_parts(self):
+        mesh = _two_spheres()
+        for budget in (2, 4, 6):
+            result = segment_semantic(
+                mesh, SilhouetteSegmenter(), resolution=128, up_axis="z", max_parts=budget
+            )
+            assert result.n_clusters <= budget
 
     def test_every_face_receives_a_label(self):
         """Hidden faces must be filled, or exported parts come out with holes."""

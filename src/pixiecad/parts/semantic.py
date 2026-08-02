@@ -15,17 +15,35 @@ The pipeline:
    the renderer already recorded which face owns each pixel.
 4. Fuse. This is the hard step and the design worth explaining.
 
-On fusing: the obvious approach is a face-by-face affinity matrix, but 20k
-faces squared is 3.2 GB and this has to run on a 16 GB laptop. So we cluster
-*masks* instead of faces. There are only ~200 masks across all views, and two
-masks that cover the same faces in different views are the same part almost by
-definition. That turns an intractable 20k-node problem into a 200-node one,
-and the face labelling falls out as a weighted vote afterwards.
+On fusing, which is where the design earns its keep. A dense face-by-face
+affinity is out: 20k faces squared is 3.2 GB and this runs on a 16 GB laptop.
+Clustering the ~200 *masks* instead was tried and abandoned -- SAM splits one
+wheel into rim and tyre within a single view, so no threshold separates "two
+masks of the same part" from "two parts", and the result was 90+ fragments.
 
-Mask overlap is measured with area-weighted Jaccard rather than pixel counts.
-A face near the silhouette gets few pixels in one view and many in another;
-weighting by true surface area makes the comparison independent of which
-views happen to see it well.
+What works is voting on mesh *edges*. For every pair of faces sharing an edge,
+count the views placing them in the same mask against those splitting them.
+That is one integer per edge, ~30k of them, and it is the entire multi-view
+signal. Parts then come out spatially connected by construction, and a single
+bad view is outvoted instead of being able to sever or merge a part alone.
+
+Turning those votes into regions needs care, and two plausible methods failed
+outright before the third worked:
+
+- Cut low-agreement edges, then take connected components. No threshold is
+  right: net>=1 leaves one region holding 94.6% of the car (wheels fused to
+  the body), while net>=6 shatters it into 17,807 fragments with nothing above
+  1%. A ratio instead of a count is worse still -- an edge is co-visible in
+  only ~4 views, so a ratio has no resolution.
+- Cut aggressively, then merge regions back by mean boundary agreement. This
+  snowballs: mean agreement carries no notion of size, so the biggest region
+  always has *some* strongly-agreeing boundary left and keeps winning. One
+  region grew from 13.6% of the surface to 97.9%.
+
+What works is Felzenszwalb-Huttenlocher: a region absorbs a neighbour only
+when the boundary between them is no worse than its own internal variation
+plus ``k / area``. That slack shrinks as a region grows, which is exactly the
+pressure the merging approach lacked.
 """
 
 from __future__ import annotations
@@ -38,18 +56,27 @@ import trimesh
 
 from .render import BACKGROUND_FACE_ID, Render, render_mesh
 
-# Two masks are the same part above this area-weighted Jaccard. Set from the
-# geometry of the problem: adjacent-but-distinct parts (a tyre and the
-# suspension arm touching it) share only their boundary faces and score well
-# under 0.3, while the same wheel seen from two angles shares its whole
-# visible surface and scores well over it.
-DEFAULT_MERGE_THRESHOLD = 0.35
+
+def _adjacency(mesh: trimesh.Trimesh) -> np.ndarray:
+    """Face adjacency that survives UV seams.
+
+    trimesh.face_adjacency keys on vertex indices, and a textured mesh
+    duplicates vertices along every UV seam -- so the graph is cut wherever
+    the texture wraps. Measured on the F1: 25,676 adjacent pairs instead of
+    ~30,000, leaving 390 regions with no neighbour at all, which stalled
+    merging at 606 parts because most regions had nothing to merge *into*.
+    cleanup solved this already; reuse it rather than rediscover it.
+    """
+    from ..meshops.cleanup import _positional_face_adjacency
+
+    return _positional_face_adjacency(mesh)
 
 # A mask covering almost the entire object is the segmenter returning the
 # whole car rather than a part; keeping it would swallow every other mask
 # during clustering.
 MAX_MASK_AREA_FRAC = 0.95
 MIN_MASK_AREA_FRAC = 0.002
+
 
 
 class Segmenter2D(Protocol):
@@ -141,89 +168,133 @@ def _regions_for_view(
     return out
 
 
-def _similarity(regions: list[MaskRegion], n_faces: int) -> np.ndarray:
-    """Area-weighted Jaccard between every pair of masks."""
-    n = len(regions)
-    sim = np.zeros((n, n), dtype=np.float64)
-    if not n:
-        return sim
+def _face_mask_labels(render: Render, labels: np.ndarray, n_faces: int) -> np.ndarray:
+    """Per-face mask id for one view; -1 where the face is not visible.
 
-    # Dense per-region indicator over faces is n_masks x n_faces of float32 --
-    # 200 x 20k is 16 MB, small enough to keep flat and fast.
-    ind = np.zeros((n, n_faces), dtype=np.float32)
-    for i, r in enumerate(regions):
-        ind[i, r.faces] = r.weights.astype(np.float32)
-
-    areas = ind.sum(axis=1)
-    # min() over the two indicators is the weighted intersection; since every
-    # region stores the same per-face area, this reduces to the shared faces.
-    for i in range(n):
-        inter = np.minimum(ind[i], ind[i + 1 :]).sum(axis=1)
-        union = areas[i] + areas[i + 1 :] - inter
-        with np.errstate(divide="ignore", invalid="ignore"):
-            s = np.where(union > 0, inter / union, 0.0)
-        sim[i, i + 1 :] = s
-        sim[i + 1 :, i] = s
-    return sim
-
-
-def _agglomerate(sim: np.ndarray, threshold: float, views: list[str] | None = None) -> np.ndarray:
-    """Cluster masks into parts; returns a cluster id per mask.
-
-    Single linkage, deliberately, plus a cannot-link constraint. The reasoning
-    is worth recording because the obvious choice is wrong.
-
-    Masks of one part from *opposite* views share no faces whatsoever -- the
-    front view of a wheel covers its front hemisphere, the back view its back
-    hemisphere, and the intersection is empty. So similarity between them is
-    zero and average linkage refuses to join them: two spheres came out as
-    eight clusters. A part is only ever connected around the object as a
-    *chain* of overlapping viewpoints, which is precisely what single linkage
-    is for.
-
-    Single linkage alone chains too eagerly, fusing distinct parts through one
-    bridging mask. The constraint fixes that without a threshold fight: two
-    masks that appear as *separate* masks in the same view are, by the
-    segmenter's own judgement, different parts. Clusters may therefore only
-    merge when they have no view in common. That makes the sphere chain close
-    around each sphere and stop, because by then both clusters hold a mask
-    from every view.
+    A face straddling a mask boundary collects pixels from both, so it takes
+    whichever mask owns the most of it rather than whichever pixel happens to
+    be read last.
     """
-    n = len(sim)
-    if n == 0:
-        return np.zeros(0, dtype=np.int64)
+    valid = render.face_id >= 0
+    out = np.full(n_faces, -1, dtype=np.int64)
+    if not valid.any():
+        return out
 
-    parent = list(range(n))
+    faces = render.face_id[valid].astype(np.int64)
+    masks = labels[valid].astype(np.int64)
+    keep = masks >= 0
+    faces, masks = faces[keep], masks[keep]
+    if not len(faces):
+        return out
+
+    stride = int(masks.max()) + 2
+    combos, counts = np.unique(faces * stride + masks, return_counts=True)
+    # Sort by count ascending within each face, then let the last write win:
+    # that leaves the majority mask in place without a per-face loop.
+    order = np.lexsort((counts, combos // stride))
+    out[combos[order] // stride] = combos[order] % stride
+    return out
+
+
+def _edge_votes(per_view: list[np.ndarray], adjacency: np.ndarray) -> np.ndarray:
+    """Net agreement per adjacent face pair: agreeing views minus dissenting.
+
+    This is the whole multi-view signal, reduced to one integer per mesh edge.
+    Faces not co-visible in a view simply do not vote, so a pair seen well
+    from four angles carries more weight than one glimpsed edge-on once.
+    """
+    a, b = adjacency[:, 0], adjacency[:, 1]
+    score = np.zeros(len(adjacency), dtype=np.int32)
+    for fm in per_view:
+        both = (fm[a] >= 0) & (fm[b] >= 0)
+        same = both & (fm[a] == fm[b])
+        score += same.astype(np.int32) - (both & ~same).astype(np.int32)
+    return score
+
+
+def _count_significant(labels: np.ndarray, area: np.ndarray, min_area_frac: float) -> int:
+    """Number of regions large enough to count as a part."""
+    _, inverse = np.unique(labels, return_inverse=True)
+    areas = np.bincount(inverse, weights=area)
+    return int((areas >= min_area_frac).sum())
+
+
+def _felzenszwalb(
+    adjacency: np.ndarray,
+    dissim: np.ndarray,
+    area: np.ndarray,
+    k: float,
+) -> np.ndarray:
+    """Graph segmentation with a size-adaptive merge threshold.
+
+    Plain agglomerative merging by boundary agreement snowballs: measured on
+    the F1, one region grew from 13.6% of the surface to 97.9%, because a big
+    region always has *some* strongly-agreeing boundary left and keeps winning
+    the merge. Mean agreement carries no notion of size, so nothing pushes
+    back.
+
+    Felzenszwalb-Huttenlocher's criterion supplies exactly that push-back. A
+    region only absorbs a neighbour when the boundary between them is no worse
+    than the region's own internal variation plus ``k / area``. That slack
+    term shrinks as a region grows, so a large region must meet an
+    increasingly strict standard, while genuinely small parts stay easy to
+    form.
+    """
+    order = np.argsort(dissim, kind="stable")
+    n = len(area)
+    parent = np.arange(n)
+    size = area.astype(np.float64).copy()
+    internal = np.zeros(n, dtype=np.float64)
 
     def find(x: int) -> int:
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
-        return x
+        return int(x)
 
-    seen: list[set[str]] = [{views[i]} if views else set() for i in range(n)]
-
-    iu, ju = np.triu_indices(n, k=1)
-    scores = sim[iu, ju]
-    keep = scores >= threshold
-    iu, ju, scores = iu[keep], ju[keep], scores[keep]
-    # Strongest evidence first, so a confident pairing is never pre-empted by
-    # a marginal one that happens to be scanned earlier.
-    for k in np.argsort(scores)[::-1]:
-        a, b = find(int(iu[k])), find(int(ju[k]))
-        if a == b or (seen[a] & seen[b]):
+    for e in order:
+        a, b = find(int(adjacency[e, 0])), find(int(adjacency[e, 1]))
+        if a == b:
             continue
-        parent[b] = a
-        seen[a] |= seen[b]
+        d = float(dissim[e])
+        if d <= min(
+            internal[a] + k / max(size[a], 1e-12),
+            internal[b] + k / max(size[b], 1e-12),
+        ):
+            if size[a] < size[b]:
+                a, b = b, a
+            parent[b] = a
+            size[a] += size[b]
+            internal[a] = d
+    return np.array([find(i) for i in range(n)], dtype=np.int64)
 
-    roots = {}
-    labels = np.empty(n, dtype=np.int64)
-    for i in range(n):
-        r = find(i)
-        if r not in roots:
-            roots[r] = len(roots)
-        labels[i] = roots[r]
-    return labels
+
+def _drop_slivers(labels: np.ndarray, area: np.ndarray, min_area_frac: float) -> np.ndarray:
+    """Mark sub-threshold regions as unlabelled so propagation reclaims them.
+
+    Marking and re-propagating rather than merging directly, because slivers
+    come in chains: a rim fragment may touch only other fragments, so a single
+    "fold into best neighbour" pass leaves most of them stranded (232 regions
+    survived on the two-sphere test). Breadth-first propagation from the
+    surviving regions reaches all of them and assigns each to the nearest real
+    part. Iterative merging was tried first and cascaded -- each absorption
+    grew a region until it swallowed the whole model.
+    """
+    uniq, inverse = np.unique(labels, return_inverse=True)
+    areas = np.bincount(inverse, weights=area, minlength=len(uniq))
+    small = areas < min_area_frac
+    if not small.any() or small.all():
+        return inverse.astype(np.int64)
+
+    out = inverse.astype(np.int64).copy()
+    out[small[inverse]] = -1
+    # Renumber survivors densely; -1 stays as the "fill me" marker.
+    survivors = np.flatnonzero(~small)
+    remap = np.full(len(uniq), -1, dtype=np.int64)
+    remap[survivors] = np.arange(len(survivors))
+    keep = out >= 0
+    out[keep] = remap[inverse[keep]]
+    return out
 
 
 def _propagate(mesh: trimesh.Trimesh, face_labels: np.ndarray) -> np.ndarray:
@@ -239,7 +310,7 @@ def _propagate(mesh: trimesh.Trimesh, face_labels: np.ndarray) -> np.ndarray:
     if not len(missing):
         return out
 
-    adj = mesh.face_adjacency
+    adj = _adjacency(mesh)
     if not len(adj):
         out[missing] = 0
         return out
@@ -272,7 +343,8 @@ def segment_semantic(
     renders: list[Render] | None = None,
     resolution: int = 512,
     up_axis: str = "y",
-    merge_threshold: float = DEFAULT_MERGE_THRESHOLD,
+    max_parts: int = 8,
+    min_area_frac: float = 0.01,
 ) -> SemanticSegmentation:
     """Label every face of ``mesh`` with a semantic part id."""
     renders = renders if renders is not None else render_mesh(
@@ -282,35 +354,57 @@ def segment_semantic(
     face_area = np.asarray(mesh.area_faces, dtype=np.float64)
 
     regions: list[MaskRegion] = []
+    per_view: list[np.ndarray] = []
     for render in renders:
-        regions.extend(_regions_for_view(render, segmenter.segment(render.rgb), face_area))
+        labels = segmenter.segment(render.rgb)
+        regions.extend(_regions_for_view(render, labels, face_area))
+        per_view.append(_face_mask_labels(render, labels, n_faces))
 
     if not regions:
         return SemanticSegmentation(np.zeros(n_faces, dtype=np.int64), 1, [], {0: []})
 
-    mask_labels = _agglomerate(
-        _similarity(regions, n_faces), merge_threshold, [r.view for r in regions]
-    )
-    n_clusters = int(mask_labels.max()) + 1 if len(mask_labels) else 1
+    adjacency = _adjacency(mesh)
+    edge_score = _edge_votes(per_view, adjacency)
+    # Dissimilarity: high agreement -> low cost to keep faces together.
+    dissim = float(edge_score.max()) - edge_score.astype(np.float64)
+    area = np.asarray(mesh.area_faces, dtype=np.float64)
+    area = area / (area.sum() or 1.0)
 
-    # Weighted vote. A face may sit under masks from several clusters near a
-    # part boundary; it goes to whichever cluster saw the most of it, summed
-    # over every view, which is exactly the multi-view agreement we rendered
-    # 14 angles to obtain.
-    votes = np.zeros((n_clusters, n_faces), dtype=np.float32)
-    for region, cluster in zip(regions, mask_labels):
-        votes[cluster, region.faces] += region.weights.astype(np.float32)
+    # k sets the region scale, and its useful value depends on the mesh and on
+    # how many parts were asked for, so search it rather than hard-code one.
+    # Bisection on a monotone-in-k region count: ~40 passes over 30k edges,
+    # which is milliseconds and far more robust than a tuned constant.
+    # Scan k rather than bisect. Two things rule bisection out: the count of
+    # regions above min_area is not monotone in k (at small k nearly every
+    # region is sub-threshold, so the count is low at *both* ends), and total
+    # region count is monotone but useless as a target, because a generative
+    # mesh carries a handful of stray 2-face components that can never merge
+    # -- bisecting to "10 regions" happily returned one real part plus nine
+    # specks. Scanning costs ~50 union-find passes, a fraction of a second.
+    best, best_count = None, -1
+    for k in np.geomspace(1e-7, 1.0, 50):
+        labels = _felzenszwalb(adjacency, dissim, area, float(k))
+        count = _count_significant(labels, area, min_area_frac)
+        # Prefer the segmentation that gets closest to the requested part
+        # count from below; ties go to the larger k, i.e. the coarser split.
+        if best_count <= count <= max_parts:
+            best, best_count = labels, count
+    if best is None:
+        best = _felzenszwalb(adjacency, dissim, area, 1.0)
 
-    face_labels = np.where(votes.max(axis=0) > 0, votes.argmax(axis=0), -1).astype(np.int64)
-    face_labels = _propagate(mesh, face_labels)
+    merged = _drop_slivers(best, area, min_area_frac)
+    face_labels = _propagate(mesh, merged)
+    n_clusters = int(face_labels.max()) + 1
 
-    cluster_views: dict[int, list[str]] = {}
-    for region, cluster in zip(regions, mask_labels):
-        cluster_views.setdefault(int(cluster), []).append(region.view)
+    # Which views contributed to each final part, for diagnostics.
+    cluster_views: dict[int, set[str]] = {}
+    for render, fm in zip(renders, per_view):
+        for cluster in np.unique(face_labels[fm >= 0]):
+            cluster_views.setdefault(int(cluster), set()).add(render.camera.name)
 
     return SemanticSegmentation(
         face_labels=face_labels,
         n_clusters=n_clusters,
         regions=regions,
-        cluster_views=cluster_views,
+        cluster_views={k: sorted(v) for k, v in cluster_views.items()},
     )

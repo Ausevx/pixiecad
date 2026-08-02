@@ -44,9 +44,11 @@ def build_sam_script(
     points_per_side: int = 32,
 ) -> str:
     """Shell script that turns ``views/`` into ``labels/`` on the GPU host."""
+    # Writes to "out": SSHExecutor rsyncs exactly that directory back, so a
+    # job that puts results anywhere else looks like a silent no-op.
     return (
         "set -e\n"
-        "mkdir -p labels\n"
+        "mkdir -p out\n"
         "docker run --rm --gpus all "
         '-v "$PWD":/work '
         # Checkpoint lives on the host, not in the image: a 2.4 GB weight file
@@ -54,7 +56,7 @@ def build_sam_script(
         '-v "$HOME/.cache/sam":/opt/sam '
         "-w /work "
         f"{image} python /work/sam_segment.py "
-        f"--views views --out labels --checkpoint {checkpoint} "
+        f"--views views --out out --checkpoint {checkpoint} "
         f"--model-type {model_type} --points-per-side {int(points_per_side)}\n"
     )
 

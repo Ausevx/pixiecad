@@ -58,6 +58,10 @@ class TestBuildScript:
         assert '-v "$HOME/.cache/sam":/opt/sam' in script
         assert "--gpus all" in script
 
+    def test_writes_to_the_directory_the_executor_collects(self):
+        """SSHExecutor rsyncs back 'out/' only; anywhere else is a silent no-op."""
+        assert "--out out " in build_sam_script()
+
     def test_passes_through_model_settings(self):
         script = build_sam_script(model_type="vit_b", points_per_side=16)
         assert "--model-type vit_b" in script
