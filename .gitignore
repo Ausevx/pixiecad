@@ -11,3 +11,4 @@ demo_ws/
 *.db
 .beads-credential-key
 .agy-worktrees/
+ws-*/

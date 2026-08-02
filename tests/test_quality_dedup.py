@@ -1,6 +1,6 @@
 import numpy as np
 
-from pixiecad.ingest.dedup import dhash, hamming, mark_duplicates
+from pixiecad.ingest.dedup import dhash, dhash_pair, hamming, mark_duplicates
 from pixiecad.ingest.quality import assess_quality
 
 
@@ -42,5 +42,30 @@ def test_dhash_stability_and_distance(sharp, blurry):
 
 
 def test_mark_duplicates_first_wins():
-    hashes = [0b0, 0b1, 0b1111111111]  # h1 within 6 bits of h0; h2 is 10 bits away
-    assert mark_duplicates(hashes, threshold=6) == [None, 0, None]
+    # (hash, flipped_hash) pairs; flips far away so the mirror rule stays out.
+    far = 0xFFFFFFFFFFFFFFFF
+    pairs = [(0b0, far), (0b1, far), (0b1111111111, far)]
+    assert mark_duplicates(pairs, threshold=6) == [None, 0, None]
+
+
+def test_mirror_views_are_not_duplicates():
+    """Opposite sides of a symmetric object must be kept (F1-car regression)."""
+    import numpy as np
+
+    rng = np.random.default_rng(3)
+    # Asymmetric scene: bright blob left of center on noise.
+    img = rng.integers(40, 200, (400, 400, 3), dtype=np.uint8)
+    img[150:250, 40:140] = 245
+    mirrored = img[:, ::-1].copy()
+
+    pairs = [dhash_pair(img), dhash_pair(mirrored)]
+    # A mirrored view may hash near its twin, but must NOT be marked duplicate.
+    assert mark_duplicates(pairs, threshold=64)[1] is None
+
+    # A true re-encode of the SAME frame is still caught.
+    import cv2
+
+    _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    re_enc = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    pairs2 = [dhash_pair(img), dhash_pair(re_enc)]
+    assert mark_duplicates(pairs2)[1] == 0

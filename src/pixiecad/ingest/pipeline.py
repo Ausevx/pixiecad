@@ -20,7 +20,7 @@ from PIL import Image, ImageOps
 
 from ..spec import ObjectSpec
 from ..workspace import Workspace, fingerprint_file
-from .dedup import DEFAULT_THRESHOLD, dhash, mark_duplicates
+from .dedup import DEFAULT_THRESHOLD, dhash_pair, mark_duplicates
 from .quality import assess_quality
 
 PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".tif", ".tiff"}
@@ -138,7 +138,7 @@ def run_ingest(
             loaded.append((len(records) - 1, img))
 
     # Near-duplicate pass over the survivors only.
-    dup_of = mark_duplicates([dhash(img) for _, img in loaded], dedup_threshold)
+    dup_of = mark_duplicates([dhash_pair(img) for _, img in loaded], dedup_threshold)
     for (rec_idx, img), match in zip(loaded, dup_of):
         rec = records[rec_idx]
         if match is not None:

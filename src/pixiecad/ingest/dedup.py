@@ -22,22 +22,39 @@ def dhash(image_bgr: np.ndarray) -> int:
     return int.from_bytes(np.packbits(diff).tobytes(), "big")
 
 
+def dhash_pair(image_bgr: np.ndarray) -> tuple[int, int]:
+    """dHash of the image and of its horizontal mirror.
+
+    Opposite-side views of a left-right symmetric object (cars!) hash close to
+    each other's *mirror*; comparing against both separates "same frame twice"
+    from "the other side of a symmetric object", which must be kept.
+    """
+    return dhash(image_bgr), dhash(image_bgr[:, ::-1])
+
+
 def hamming(a: int, b: int) -> int:
     return (a ^ b).bit_count()
 
 
 def mark_duplicates(
-    hashes: list[int], threshold: int = DEFAULT_THRESHOLD
+    hash_pairs: list[tuple[int, int]], threshold: int = DEFAULT_THRESHOLD
 ) -> list[int | None]:
     """For each item, index of the earlier near-duplicate it matches, else None.
 
-    Greedy first-wins: the first occurrence is kept, later lookalikes point
-    back at it.
+    Greedy first-wins. An item close to a kept frame is only a duplicate if it
+    is not *better* explained as that frame's mirror image: strictly smaller
+    distance to the mirror means it's the opposite side of a symmetric object.
     """
     kept: list[int] = []
     result: list[int | None] = []
-    for i, h in enumerate(hashes):
-        match = next((j for j in kept if hamming(h, hashes[j]) <= threshold), None)
+    for i, (h, _) in enumerate(hash_pairs):
+        match = None
+        for j in kept:
+            hj, hj_flip = hash_pairs[j]
+            d_plain = hamming(h, hj)
+            if d_plain <= threshold and not hamming(h, hj_flip) < d_plain:
+                match = j
+                break
         result.append(match)
         if match is None:
             kept.append(i)
