@@ -1,6 +1,7 @@
 """FastAPI application for PixieCAD local web dashboard."""
 
 from __future__ import annotations
+from pixiecad.web.finishing import FinishOptions, finish_model
 
 import dataclasses
 import inspect
@@ -136,6 +137,7 @@ def create_app(root: Path) -> FastAPI:
         backend: str | None = None,
         split: bool = True,
         object_hint: str | None = None,
+        finish: FinishOptions | None = None,
     ) -> None:
         with lock:
             job = jobs.get(job_id)
@@ -212,6 +214,49 @@ def create_app(root: Path) -> FastAPI:
                     shutil.copytree(parts_dir, published_parts, dirs_exist_ok=True)
                     parts_dir = str(published_parts)
 
+            # Finishing runs on the published copy in output/, so the
+            # workspace under work/ stays pure build scratch.
+            if finish and glb_path and Path(glb_path).exists():
+                def _log(message: str) -> None:
+                    with lock:
+                        current = jobs.get(job_id)
+                        if current:
+                            current["log"].append(message)
+
+                with lock:
+                    current = jobs.get(job_id)
+                    if current:
+                        current["stage"] = "finishing"
+
+                photos = sorted(
+                    q for q in (ws_root / "input").glob("*")
+                    if q.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+                )
+                fin = finish_model(
+                    glb_path,
+                    Path(glb_path).parent,
+                    finish,
+                    conditioning_image=photos[0] if photos else None,
+                    log=_log,
+                )
+                warnings = list(warnings) + fin.warnings
+                if fin.parts:
+                    parts_raw = fin.parts
+                    parts_dir = str(fin.parts_dir) if fin.parts_dir else parts_dir
+                    parts = []
+                    for p_dict in parts_raw:
+                        entry = dict(p_dict)
+                        entry["url"] = f"/api/jobs/{job_id}/parts/{entry.get('file')}"
+                        parts.append(entry)
+                web_model = Path(glb_path).parent / "model_web.glb"
+                with lock:
+                    current = jobs.get(job_id)
+                    if current:
+                        current["finish_steps"] = fin.steps
+                        current["textured"] = fin.textured
+                        if web_model.exists():
+                            current["web_url"] = f"/api/jobs/{job_id}/model_web.glb"
+
             summary_lines = result.summary_lines() if hasattr(result, "summary_lines") else []
 
             with lock:
@@ -262,6 +307,13 @@ def create_app(root: Path) -> FastAPI:
         split: bool = Form(True),
         object_hint: str | None = Form(None),
         backend: str | None = Form(None),
+        smooth_iterations: int = Form(0),
+        texture: bool = Form(False),
+        segmentation: str = Form("auto"),
+        web_export: bool = Form(False),
+        texture_size: int = Form(1024),
+        max_parts: int = Form(8),
+        gpu_host: str | None = Form(None),
     ):
         # One session folder per upload: input/, work/ and output/ are never
         # shared between jobs, so two people uploading at once cannot read or
@@ -289,6 +341,17 @@ def create_app(root: Path) -> FastAPI:
         backend_val = backend.strip() if backend and backend.strip() else None
         hint_val = object_hint.strip() if object_hint and object_hint.strip() else None
 
+        finish = FinishOptions(
+            smooth_iterations=max(0, smooth_iterations),
+            texture=texture,
+            segmentation=segmentation,
+            web_export=web_export,
+            texture_size=texture_size,
+            max_parts=max(1, max_parts),
+            total_budget=target_faces,
+            gpu_host=(gpu_host.strip() or None) if gpu_host else None,
+        )
+
         session.write_meta(job_id=job_id, name=spec.name, target_faces=target_faces)
 
         job_info: dict[str, Any] = {
@@ -310,6 +373,15 @@ def create_app(root: Path) -> FastAPI:
             "split": split,
             "object_hint": hint_val,
             "backend": backend_val,
+            "finish": {
+                "smooth_iterations": finish.smooth_iterations,
+                "texture": finish.texture,
+                "segmentation": finish.segmentation,
+                "web_export": finish.web_export,
+                "texture_size": finish.texture_size,
+                "gpu_host": finish.gpu_host,
+            },
+            "web_url": None,
         }
 
         with lock:
@@ -317,7 +389,7 @@ def create_app(root: Path) -> FastAPI:
 
         thread = threading.Thread(
             target=_job_worker,
-            args=(job_id, job_dir, target_faces, backend_val, split, hint_val),
+            args=(job_id, job_dir, target_faces, backend_val, split, hint_val, finish),
             daemon=True,
         )
         thread.start()
@@ -457,6 +529,24 @@ def create_app(root: Path) -> FastAPI:
             media_type="model/gltf-binary",
             filename=f"{job['name']}.glb",
         )
+
+    @app.get("/api/jobs/{job_id}/model_web.glb")
+    def get_web_glb(job_id: str):
+        """The web-sized model: same geometry, smaller texture."""
+        with lock:
+            job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        glb = job.get("glb_path")
+        if not glb:
+            raise HTTPException(status_code=404, detail="no model for this job")
+        web = Path(glb).parent / "model_web.glb"
+        if not web.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail="no web export for this job; enable 'Optimise for web'",
+            )
+        return FileResponse(web, media_type="model/gltf-binary", filename="model_web.glb")
 
     @app.get("/api/cloud")
     def get_cloud():

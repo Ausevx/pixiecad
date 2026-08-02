@@ -7,6 +7,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pathlib
 import pytest
 from fastapi.testclient import TestClient
 
@@ -263,3 +264,42 @@ def test_each_job_gets_its_own_session_folder(tmp_path: Path):
     # Each session holds only the photo that was uploaded to it.
     assert [p.name for p in (Path(a["dir"]) / "input").iterdir()] == ["photo1.jpg"]
     assert [p.name for p in (Path(b["dir"]) / "input").iterdir()] == ["photo2.jpg"]
+
+
+class TestFinishingOptionsWiring:
+    """The dashboard form must actually reach FinishOptions.
+
+    These are wiring tests, not behaviour tests: a renamed form field fails
+    silently otherwise, falling back to a default and quietly not doing what
+    the user ticked.
+    """
+
+    def test_form_fields_match_the_api(self):
+        """Every finishing input in the HTML must be a real API parameter."""
+        import inspect
+        import re
+
+        from pixiecad.web import app as app_module
+
+        html = (
+            pathlib.Path(app_module.__file__).parent / "static" / "index.html"
+        ).read_text()
+        names = set(re.findall(r'name="([a-z_]+)"', html))
+        source = inspect.getsource(app_module.create_app)
+        for field in (
+            "smooth_iterations",
+            "texture",
+            "segmentation",
+            "web_export",
+            "texture_size",
+            "max_parts",
+            "gpu_host",
+        ):
+            assert field in names, f"{field} missing from the dashboard form"
+            assert f"{field}:" in source, f"{field} not accepted by /api/jobs"
+
+    def test_defaults_do_not_require_a_gpu(self):
+        """An untouched form must run entirely locally."""
+        from pixiecad.web.finishing import FinishOptions
+
+        assert not FinishOptions().needs_gpu

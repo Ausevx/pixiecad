@@ -319,6 +319,58 @@
               <input type="text" id="object-hint" name="object_hint" class="form-control" placeholder="e.g. chair, mug, engine part">
             </div>
 
+            <hr style="border:none;border-top:1px solid rgba(255,255,255,0.12);margin:1rem 0 0.75rem;">
+            <div style="font-weight:600;margin-bottom:0.5rem;">Finishing</div>
+
+            <div class="form-group">
+              <label for="smooth-iterations">Smoothing passes (0 = off)</label>
+              <input type="number" id="smooth-iterations" name="smooth_iterations" class="form-control"
+                     value="5" min="0" max="20">
+              <small style="opacity:0.7;">Taubin smoothing. Face count is unchanged, so this costs nothing in your polygon budget.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="max-parts">Max parts</label>
+              <input type="number" id="max-parts" name="max_parts" class="form-control" value="8" min="1" max="32">
+            </div>
+
+            <div class="form-group">
+              <label for="segmentation">Part segmentation</label>
+              <select id="segmentation" name="segmentation" class="form-control">
+                <option value="auto">Geometric (local, instant)</option>
+                <option value="semantic">Semantic via SAM (needs GPU host, ~2 min)</option>
+              </select>
+              <small style="opacity:0.7;">Generative meshes are one fused shell; geometric splitting falls back to spatial blobs on them.</small>
+            </div>
+
+            <div class="form-group" style="flex-direction: row; align-items: center; gap: 0.5rem;">
+              <input type="checkbox" id="texture-checkbox" name="texture" value="true" style="width: auto;">
+              <label for="texture-checkbox" style="margin: 0;">Generate texture (needs GPU host, ~2 min)</label>
+            </div>
+
+            <div class="form-group" style="flex-direction: row; align-items: center; gap: 0.5rem;">
+              <input type="checkbox" id="web-checkbox" name="web_export" value="true" checked style="width: auto;">
+              <label for="web-checkbox" style="margin: 0;">Also export a web-sized copy</label>
+            </div>
+
+            <div class="form-group">
+              <label for="texture-size">Web texture size</label>
+              <select id="texture-size" name="texture_size" class="form-control">
+                <option value="2048">2048 - full quality</option>
+                <option value="1024" selected>1024 - recommended for web</option>
+                <option value="512">512 - small</option>
+                <option value="256">256 - thumbnail</option>
+              </select>
+              <small style="opacity:0.7;">Texture, not polygons, dominates download size: 2048 gives 7.7 MB, 1024 gives 1.8 MB.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="gpu-host">GPU host (optional)</label>
+              <input type="text" id="gpu-host" name="gpu_host" class="form-control"
+                     placeholder="name.zone.project, e.g. pixiecad-tex.asia-southeast1-b.my-project">
+              <small style="opacity:0.7;">An SSH alias from <code>gcloud compute config-ssh</code>. Leave blank to run everything locally.</small>
+            </div>
+
             <button type="submit" class="btn" id="submit-btn" style="margin-top: 0.5rem;">Start Pipeline</button>
           </div>
         </form>
