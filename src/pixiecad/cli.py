@@ -415,6 +415,35 @@ def drawings(
 
 
 @app.command()
+def convert(
+    mesh_file: Path = typer.Argument(..., help="Input .glb / .obj / .stl / .ply"),
+    out: Path = typer.Argument(..., help="Output path; format comes from the suffix"),
+    size_mm: float = typer.Option(
+        None, "--size-mm", help="Scale so the longest edge is this many millimetres"
+    ),
+    repair: bool = typer.Option(False, "--repair", help="Attempt to close holes first"),
+):
+    """Convert a model for CAD or 3D printing, and report whether it is a solid."""
+    import trimesh
+
+    from .meshops.cadexport import export_cad, inspect_solid
+
+    mesh = trimesh.load(mesh_file, force="mesh", process=False)
+    typer.echo("input:")
+    for line in inspect_solid(mesh).summary():
+        typer.echo(f"  {line}")
+
+    path, report, actions = export_cad(mesh, out, longest_mm=size_mm, repair=repair)
+    for action in actions:
+        typer.echo(f"  - {action}")
+    typer.echo(f"wrote {path} ({path.stat().st_size / 1024:.0f} KB)")
+    typer.echo(
+        "  ready for a slicer" if report.printable
+        else "  NOT a closed solid -- try --repair, or fix in Meshmixer/Blender"
+    )
+
+
+@app.command()
 def serve(
     root: Path = typer.Option("jobs", "--root", "-r", help="Directory for job workspaces"),
     port: int = typer.Option(8000, help="Port"),
