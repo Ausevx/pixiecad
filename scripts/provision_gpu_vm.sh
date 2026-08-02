@@ -148,7 +148,12 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 sudo usermod -aG docker $USER
-if [ -n '"$PULL_IMAGE"' ]; then sudo docker pull '"$PULL_IMAGE"'; fi
+# Quote carefully: with an empty PULL_IMAGE this used to reach the VM as
+# "[ -n ]", which POSIX evaluates as true (one argument, non-empty string
+# "-n"), so it ran "docker pull" with no image on every workload that builds
+# its own.
+PULL='"$PULL_IMAGE"'
+if [ -n "$PULL" ]; then sudo docker pull "$PULL"; fi
 '
 
 echo "registering ssh alias ..."

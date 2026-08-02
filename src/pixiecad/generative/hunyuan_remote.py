@@ -135,6 +135,104 @@ def build_hunyuan_script(
     )
 
 
+DEFAULT_PAINT_IMAGE = "pixiecad-hunyuan-paint:latest"
+_TEXTURE_SCRIPT = Path(__file__).parent / "remote_scripts" / "hunyuan_texture.py"
+
+
+def build_texture_script(
+    *,
+    image: str = DEFAULT_PAINT_IMAGE,
+    mesh_name: str = "mesh.glb",
+    image_name: str = "00.png",
+    max_views: int = 6,
+    resolution: int = 512,
+) -> str:
+    """Shell script that textures ``mesh_name`` into ``out/textured.glb``."""
+    return (
+        "set -e\n"
+        "mkdir -p out\n"
+        "docker run --rm --gpus all "
+        '-v "$PWD":/work '
+        '-v "$HOME/.cache/huggingface":/root/.cache/huggingface '
+        '-v "$HOME/.cache/hy3dgen":/root/.cache/hy3dgen '
+        '-v "$HOME/.u2net":/root/.u2net '
+        "-w /work "
+        f"{image} python /work/hunyuan_texture.py "
+        f"--mesh /work/{mesh_name} --image /work/images/{image_name} "
+        f"--out out/textured.glb --max-views {int(max_views)} "
+        f"--resolution {int(resolution)}\n"
+    )
+
+
+def texture_mesh(
+    executor: Executor,
+    mesh_path: str | Path,
+    image_path: str | Path,
+    out_dir: str | Path,
+    *,
+    docker_image: str = DEFAULT_PAINT_IMAGE,
+    max_views: int = 6,
+    resolution: int = 512,
+    timeout_s: int = 3600,
+) -> Path:
+    """Texture an existing mesh on the GPU host; returns the textured GLB.
+
+    Separate from ``generate`` so a good shape can be re-textured without
+    paying for regeneration -- texturing is the stage most likely to need a
+    second attempt, and the geometry is the expensive part to get right.
+    """
+    from ..executors.base import Job
+    from .base import GenerativeError
+
+    mesh_path, image_path, out_dir = Path(mesh_path), Path(image_path), Path(out_dir)
+    if not mesh_path.is_file():
+        raise GenerativeError(f"no mesh to texture at '{mesh_path}'")
+    if not image_path.is_file():
+        raise GenerativeError(f"no conditioning image at '{image_path}'")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        staged_images = tmp_path / "images"
+        staged_images.mkdir()
+        img_name = f"00{image_path.suffix or '.png'}"
+        shutil.copyfile(image_path, staged_images / img_name)
+        shutil.copyfile(mesh_path, tmp_path / "mesh.glb")
+        shutil.copyfile(_TEXTURE_SCRIPT, tmp_path / "hunyuan_texture.py")
+
+        job = Job(
+            command=[
+                "sh",
+                "-c",
+                build_texture_script(
+                    image=docker_image,
+                    image_name=img_name,
+                    max_views=max_views,
+                    resolution=resolution,
+                ),
+            ],
+            inputs=[
+                staged_images,
+                tmp_path / "mesh.glb",
+                tmp_path / "hunyuan_texture.py",
+            ],
+            output_dir=out_dir,
+            remote_subdir=f"hytex-{abs(hash(mesh_path.name)) % 10**8:08d}",
+            timeout_s=timeout_s,
+        )
+        result = executor.run(job)
+
+    if not result.ok:
+        raise GenerativeError(
+            f"Hunyuan3D texturing failed: {(result.stderr_tail or '')[-1500:]}"
+        )
+    textured = Path(out_dir) / "textured.glb"
+    if not textured.exists():
+        raise GenerativeError(
+            f"texturing reported success but produced no mesh at '{textured}'"
+        )
+    return textured
+
+
 def _gpu_supported(caps: Any) -> bool:
     """True when the host has enough VRAM. No architecture allow-list here.
 
