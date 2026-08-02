@@ -141,16 +141,25 @@ def test_ssh_executor_run_happy_path(monkeypatch, tmp_path: Path):
     assert res.stdout_tail == "step success"
 
     assert len(calls) == 4
-    assert calls[0] == ["ssh", "remote.test", "mkdir -p /tmp/jobs/my_job_1"]
-    assert calls[1] == ["rsync", "-az", str(input1), "remote.test:/tmp/jobs/my_job_1/"]
+    # Keepalives are always present: a generative job can sit silent for many
+    # minutes and an idle channel gets dropped by NAT.
+    keepalive = ["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=10"]
+    assert calls[0] == ["ssh", *keepalive, "remote.test", "mkdir -p /tmp/jobs/my_job_1"]
+    assert calls[1] == [
+        "rsync", "-az",
+        "-e", "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10",
+        str(input1), "remote.test:/tmp/jobs/my_job_1/",
+    ]
     assert calls[2] == [
         "ssh",
+        *keepalive,
         "remote.test",
         "cd /tmp/jobs/my_job_1 && python process.py --flag",
     ]
     assert calls[3] == [
         "rsync",
         "-az",
+        "-e", "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10",
         "remote.test:/tmp/jobs/my_job_1/out/",
         f"{output_dir}/",
     ]

@@ -19,7 +19,16 @@ class SSHExecutor:
     ):
         self.host = host
         self.base_dir = base_dir
-        self.ssh_opts = list(ssh_opts) if ssh_opts else []
+        # Generative jobs sit silent for many minutes while the remote worker
+        # loads a model, and an idle SSH channel is exactly what NAT and
+        # firewalls drop. Keepalives make the connection survive that silence,
+        # and the count bounds how long a genuinely dead host wedges us.
+        self.ssh_opts = [
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=10",
+        ]
+        if ssh_opts:
+            self.ssh_opts.extend(ssh_opts)
 
     def _exec(
         self, cmd: list[str], timeout_s: float | None = None

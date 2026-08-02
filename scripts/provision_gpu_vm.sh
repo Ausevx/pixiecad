@@ -36,10 +36,17 @@ case "$WORKLOAD" in
     # The worker image is compiled for Ada (sm_89) only — a T4 cannot run it.
     [ "$GPU" = "l4" ] || { echo "trellis needs --gpu l4 (image is sm_89 only)" >&2; exit 2; }
     PULL_IMAGE="kngsly/trellis2-worker:latest"
+    # SPOT IS A POOR FIT FOR THIS WORKLOAD. Cold start is ~15 min (9 GB image
+    # pull, then a 19 GB model download), and a preemption deletes the boot
+    # disk, so the whole cache is lost and the next attempt starts from zero.
+    # One run was preempted 8 minutes in, before the model had even loaded.
+    # Pass PIXIECAD_ONDEMAND=1 to trade ~4x price for a run that finishes.
     # HOST RAM, not VRAM, is the binding constraint at load time: the model is
-    # staged in system memory and peaks around 15 GB. g2-standard-4 has 16 GB
-    # and gets OOM-killed by the kernel every time; g2-standard-8 has 32 GB.
-    MACHINE="g2-standard-8"
+    # staged in system memory before anything reaches the GPU. Measured on
+    # 2026-08-02: g2-standard-4 (16 GB) is OOM-killed at 15.2 GB, and the load
+    # was still climbing past 28 GB on a 32 GB g2-standard-8 — so 64 GB is the
+    # first size with real headroom. Do not "optimise" this back down.
+    MACHINE="g2-standard-16"
     # Cold start is dominated by fixed costs: ~9 GB image pull plus a model
     # download on first /ready. Two hours leaves room for that plus real work.
     MAX_RUN=7200; GUARD_SLEEP=6600; DISK=200
@@ -59,13 +66,24 @@ cat > "$STARTUP" <<EOF
 (sleep $GUARD_SLEEP && shutdown -h now) &
 EOF
 
-echo "creating $NAME ($MACHINE + $ACCEL, SPOT) in $ZONE ..."
-# SPOT + DELETE-on-preempt: our stage cache makes a killed job a no-op re-run,
-# so the 60-90% discount is free money. Expect stockouts — try other zones.
+# Spot is the default because a killed job is a safe re-run for the COLMAP
+# path, where the stage cache genuinely absorbs it. See the trellis note above
+# for why that reasoning does NOT carry over to the generative workload.
+if [ "${PIXIECAD_ONDEMAND:-0}" = "1" ]; then
+  PROVISIONING=(--provisioning-model=STANDARD)
+  MODEL_DESC="on-demand"
+else
+  PROVISIONING=(--provisioning-model=SPOT --instance-termination-action=DELETE)
+  MODEL_DESC="SPOT"
+fi
+
+echo "creating $NAME ($MACHINE + $ACCEL, $MODEL_DESC) in $ZONE ..."
+# Expect stockouts on spot — sweep zones, and note that L4 quota is 1 per
+# region in every region checked, so any zone with capacity will do.
 gcloud compute instances create "$NAME" \
   --project="$PROJECT" --zone="$ZONE" \
   --machine-type="$MACHINE" --accelerator="type=$ACCEL,count=1" \
-  --provisioning-model=SPOT --instance-termination-action=DELETE \
+  "${PROVISIONING[@]}" \
   --max-run-duration=${MAX_RUN}s \
   --image-family="$IMAGE_FAMILY" --image-project=deeplearning-platform-release \
   --boot-disk-size=${DISK}GB --boot-disk-type=pd-balanced \
