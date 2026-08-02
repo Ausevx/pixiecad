@@ -284,7 +284,7 @@
 <body>
   <header style="position:relative;">
     <h1><span>✨</span> PixieCAD Local Dashboard</h1>
-    <span id="app-version" data-version="v0.1.0"
+    <span id="app-version" data-version="v0.2.0"
           style="position:absolute;top:0.75rem;right:1rem;font-size:0.7rem;
                  letter-spacing:0.06em;opacity:0.35;font-variant-numeric:tabular-nums;
                  user-select:none;"></span>
@@ -428,6 +428,7 @@
 
       <div class="card">
         <h2 class="card-title">Jobs</h2>
+        <div id="job-files" style="font-size:0.85em;margin-bottom:0.6rem;"></div>
         <div class="job-list" id="job-list">
           <p style="color: var(--text-dim); font-size: 0.85rem;">No jobs yet.</p>
         </div>
@@ -578,6 +579,71 @@
       } else {
         dropText.innerText = '📸 Drop photos here or click to browse';
       }
+    }
+
+    // --- Job files: download, convert, delete -----------------------------
+    let filesJobId = null;
+
+    function fmtKB(b) {
+      return b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB';
+    }
+
+    async function loadJobFiles(jobId) {
+      filesJobId = jobId;
+      const box = document.getElementById('job-files');
+      if (!jobId) { box.innerHTML = ''; return; }
+      let d;
+      try { d = await (await fetch('/api/jobs/' + jobId + '/files')).json(); }
+      catch (e) { box.textContent = 'Could not list files.'; return; }
+      if (!d.files || !d.files.length) { box.innerHTML = '<div style="opacity:0.6;">No output yet.</div>'; return; }
+
+      const rows = d.files.map(f =>
+        '<div style="display:flex;justify-content:space-between;gap:0.5rem;padding:0.15rem 0;">' +
+        '<a href="' + f.url + '" download>' + f.name + '</a>' +
+        '<span style="opacity:0.6;white-space:nowrap;">' + fmtKB(f.bytes) + '</span></div>').join('');
+
+      box.innerHTML =
+        '<div style="max-height:150px;overflow-y:auto;">' + rows + '</div>' +
+        '<div style="opacity:0.65;margin:0.35rem 0;">total ' + fmtKB(d.total_bytes) + '</div>' +
+        '<div style="display:flex;gap:0.35rem;align-items:center;flex-wrap:wrap;">' +
+        '<select id="cv-fmt" class="form-control" style="width:auto;padding:0.2rem;">' +
+        '<option value="stl">STL</option><option value="obj">OBJ</option><option value="ply">PLY</option></select>' +
+        '<input id="cv-mm" class="form-control" style="width:6rem;padding:0.2rem;" ' +
+        'type="number" min="1" placeholder="mm" title="Longest edge in millimetres">' +
+        '<button type="button" class="btn" id="cv-go" style="padding:0.2rem 0.6rem;">Convert</button>' +
+        '<button type="button" class="btn" id="job-del" style="padding:0.2rem 0.6rem;background:#7a2c2c;">Delete job</button>' +
+        '</div><div id="cv-out" style="opacity:0.8;margin-top:0.35rem;"></div>';
+
+      document.getElementById('cv-go').onclick = async () => {
+        const out = document.getElementById('cv-out');
+        const mm = parseFloat(document.getElementById('cv-mm').value);
+        out.textContent = 'Converting...';
+        const res = await fetch('/api/jobs/' + jobId + '/convert', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            format: document.getElementById('cv-fmt').value,
+            size_mm: isNaN(mm) ? null : mm,
+          }),
+        });
+        const r = await res.json();
+        if (!res.ok) { out.textContent = 'Error: ' + (r.detail || 'failed'); return; }
+        out.innerHTML = '<a href="' + r.url + '" download><b>' + r.file + '</b></a> ' +
+          fmtKB(r.bytes) +
+          (r.printable ? ' &middot; closed solid, slicer-ready'
+                       : ' &middot; <span style="color:#fca5a5;">not a closed solid</span>') +
+          '<div style="opacity:0.7;">' + (r.actions || []).join('<br>') + '</div>';
+        loadJobFiles(jobId);
+      };
+
+      document.getElementById('job-del').onclick = async () => {
+        if (!confirm('Delete this job and all its files from disk? This cannot be undone.')) return;
+        const res = await fetch('/api/jobs/' + jobId, { method: 'DELETE' });
+        const r = await res.json();
+        document.getElementById('cv-out').textContent = res.ok
+          ? 'Deleted, freed ' + fmtKB(r.freed_bytes)
+          : 'Error: ' + (r.detail || 'failed');
+        if (res.ok) { document.getElementById('job-files').innerHTML = ''; loadJobs(); }
+      };
     }
 
     document.getElementById('app-version').textContent =
@@ -843,6 +909,7 @@
         if (!res.ok) return;
         const job = await res.json();
         renderStages(job);
+        if (job.status === 'done' && filesJobId !== jobId) loadJobFiles(jobId);
         const logPanel = document.getElementById('log-panel');
         // Follow the tail only when the user is already there. Unconditional
         // scrolling yanks the view away the moment they scroll up to read an

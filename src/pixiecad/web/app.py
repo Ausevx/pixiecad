@@ -102,6 +102,28 @@ def _gcp_project() -> str:
         return ""
 
 
+class ConvertRequest(BaseModel):
+    """GLB -> STL/OBJ/PLY for CAD and slicers."""
+
+    source: str = "model.glb"
+    format: str = "stl"
+    size_mm: float | None = None
+    repair: bool = False
+
+
+def _safe_output_file(job_dir: Path, relative: str) -> Path:
+    """Resolve ``relative`` inside a job's output dir, refusing escapes.
+
+    Filenames reach this from the browser, so a '../../etc/passwd' must not
+    resolve outside the job. resolve() then a prefix check is the whole guard.
+    """
+    out_dir = (Path(job_dir) / "output").resolve()
+    target = (out_dir / relative).resolve()
+    if not str(target).startswith(str(out_dir) + os.sep) and target != out_dir:
+        raise HTTPException(status_code=400, detail="path outside the job directory")
+    return target
+
+
 class ProvisionRequest(BaseModel):
     gpu: str = "l4"
     name: str = "pixiecad-gpu"
@@ -655,6 +677,115 @@ def create_app(root: Path) -> FastAPI:
                 detail="no web export for this job; enable 'Optimise for web'",
             )
         return FileResponse(web, media_type="model/gltf-binary", filename="model_web.glb")
+
+    @app.get("/api/jobs/{job_id}/files")
+    def job_files(job_id: str):
+        """Everything this job produced, read from disk.
+
+        From disk rather than from the in-memory job record: sessions survive
+        a server restart but the record does not, and the files are the thing
+        the user actually cares about.
+        """
+        with lock:
+            job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        out_dir = Path(job["dir"]) / "output"
+        if not out_dir.is_dir():
+            return {"files": [], "total_bytes": 0, "output_dir": str(out_dir)}
+
+        files = []
+        for path in sorted(out_dir.rglob("*")):
+            if path.is_file():
+                rel = path.relative_to(out_dir).as_posix()
+                files.append({
+                    "name": rel,
+                    "bytes": path.stat().st_size,
+                    "url": f"/api/jobs/{job_id}/download/{rel}",
+                })
+        return {
+            "files": files,
+            "total_bytes": sum(f["bytes"] for f in files),
+            "output_dir": str(out_dir),
+        }
+
+    @app.get("/api/jobs/{job_id}/download/{relative:path}")
+    def job_download(job_id: str, relative: str):
+        with lock:
+            job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        target = _safe_output_file(Path(job["dir"]), relative)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"no such file: {relative}")
+        return FileResponse(
+            target, filename=target.name, media_type="application/octet-stream"
+        )
+
+    @app.delete("/api/jobs/{job_id}")
+    def delete_job(job_id: str):
+        """Delete a job's whole session folder from disk. Not reversible."""
+        with lock:
+            job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        if job.get("status") == "running":
+            raise HTTPException(
+                status_code=409, detail="job is still running; wait for it to finish"
+            )
+
+        session_dir = Path(job["dir"]).resolve()
+        root_resolved = root.resolve()
+        # Never delete outside the jobs root, and never the root itself.
+        if session_dir == root_resolved or root_resolved not in session_dir.parents:
+            raise HTTPException(status_code=400, detail="refusing to delete outside the jobs root")
+
+        freed = sum(f.stat().st_size for f in session_dir.rglob("*") if f.is_file())
+        shutil.rmtree(session_dir, ignore_errors=True)
+        with lock:
+            jobs.pop(job_id, None)
+        return {"deleted": str(session_dir), "freed_bytes": freed}
+
+    @app.post("/api/jobs/{job_id}/convert")
+    def convert_job(job_id: str, req: ConvertRequest):
+        """Convert a produced model to STL/OBJ/PLY for CAD or a slicer."""
+        from pixiecad.meshops.cadexport import CAD_FORMATS, export_cad
+
+        with lock:
+            job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        fmt = req.format.lower().lstrip(".")
+        if fmt not in CAD_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported format '{fmt}'; use {', '.join(CAD_FORMATS)}",
+            )
+
+        source = _safe_output_file(Path(job["dir"]), req.source)
+        if not source.is_file():
+            raise HTTPException(status_code=404, detail=f"no such model: {req.source}")
+
+        mesh = trimesh.load(source, force="mesh", process=False)
+        name = f"{Path(job['name'] or 'model').stem}.{fmt}"
+        try:
+            path, report, actions = export_cad(
+                mesh,
+                source.parent / name,
+                longest_mm=req.size_mm,
+                repair=req.repair,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+        return {
+            "file": path.name,
+            "bytes": path.stat().st_size,
+            "url": f"/api/jobs/{job_id}/download/{path.name}",
+            "printable": report.printable,
+            "solid": report.summary(),
+            "actions": actions,
+        }
 
     @app.get("/api/cloud/inventory")
     def cloud_inventory():

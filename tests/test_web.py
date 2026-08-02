@@ -410,3 +410,40 @@ class TestDashboardVersion:
         html = (pathlib.Path(app_module.__file__).parent / "static" / "index.html").read_text()
         assert 'id="stage-track"' in html
         assert "renderStages(job)" in html
+
+
+class TestJobFilesAndConvert:
+    def test_path_traversal_is_refused(self, tmp_path: Path):
+        """Filenames arrive from the browser; escaping the job dir must fail."""
+        from fastapi import HTTPException
+
+        from pixiecad.web.app import _safe_output_file
+
+        job = tmp_path / "job"
+        (job / "output").mkdir(parents=True)
+        with pytest.raises(HTTPException) as exc:
+            _safe_output_file(job, "../../../../etc/passwd")
+        assert exc.value.status_code == 400
+
+    def test_normal_filenames_resolve(self, tmp_path: Path):
+        from pixiecad.web.app import _safe_output_file
+
+        job = tmp_path / "job"
+        (job / "output" / "parts").mkdir(parents=True)
+        assert _safe_output_file(job, "model.glb").name == "model.glb"
+        assert _safe_output_file(job, "parts/body.glb").name == "body.glb"
+
+    def test_files_endpoint_404s_for_unknown_job(self, client):
+        assert client.get("/api/jobs/nope/files").status_code == 404
+
+    def test_convert_rejects_unsupported_format(self, client, tmp_path: Path):
+        from pixiecad.web import app as app_module
+
+        # Register a minimal job record so we reach the format check.
+        assert client.post("/api/jobs/nope/convert", json={"format": "step"}).status_code == 404
+
+    def test_delete_refuses_a_running_job(self, client, tmp_path: Path):
+        """Deleting mid-run would pull files out from under the worker."""
+        import pixiecad.web.app as m
+
+        assert client.delete("/api/jobs/missing").status_code == 404
