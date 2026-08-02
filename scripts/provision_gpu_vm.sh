@@ -51,7 +51,18 @@ case "$WORKLOAD" in
     # download on first /ready. Two hours leaves room for that plus real work.
     MAX_RUN=7200; GUARD_SLEEP=6600; DISK=200
     ;;
-  *) echo "unknown workload: $WORKLOAD (use colmap or trellis)" >&2; exit 2 ;;
+  hunyuan)
+    [ "$GPU" = "l4" ] || { echo "hunyuan expects --gpu l4" >&2; exit 2; }
+    # Nothing to pre-pull: the worker image is built on the VM from Tencent's
+    # own Dockerfile by scripts/setup_hunyuan_vm.sh.
+    PULL_IMAGE=""
+    # 64 GB because a diffusion model's loader stages weights in system memory
+    # before the GPU sees them, and a 32 GB host was not enough for the last
+    # model we tried. Disk holds the CUDA build plus ~10 GB of weights.
+    MACHINE="g2-standard-16"
+    MAX_RUN=7200; GUARD_SLEEP=6600; DISK=200
+    ;;
+  *) echo "unknown workload: $WORKLOAD (use colmap, trellis or hunyuan)" >&2; exit 2 ;;
 esac
 
 # The image family matters: 'common-cu124-*' does NOT exist. List current ones:
@@ -116,7 +127,7 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 sudo usermod -aG docker $USER
-sudo docker pull '"$PULL_IMAGE"'
+if [ -n '"$PULL_IMAGE"' ]; then sudo docker pull '"$PULL_IMAGE"'; fi
 '
 
 echo "registering ssh alias ..."

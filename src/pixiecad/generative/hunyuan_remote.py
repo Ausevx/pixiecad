@@ -63,11 +63,14 @@ def build_hunyuan_script(
     return (
         "set -e\n"
         "mkdir -p out\n"
-        # The HF cache is mounted from the host so the ~10 GB of weights
-        # survive between jobs; only the first run on a fresh VM downloads.
+        # Both caches are mounted from the host so the ~10 GB of weights survive
+        # between jobs. hy3dgen keeps its own cache separate from HuggingFace's,
+        # and missing it means every --rm run re-downloads the whole model.
         "docker run --rm --gpus all "
         '-v "$PWD":/work '
         '-v "$HOME/.cache/huggingface":/root/.cache/huggingface '
+        '-v "$HOME/.cache/hy3dgen":/root/.cache/hy3dgen '
+        '-v "$HOME/.u2net":/root/.u2net '
         "-w /work "
         f"{image} python /work/hunyuan_gen.py {' '.join(flags)}\n"
     )

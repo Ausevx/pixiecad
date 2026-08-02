@@ -330,10 +330,24 @@ def collect_outputs(result, session, *, drawings: bool, spec) -> dict:
     if result.parts:
         parts_dir = session.output_dir / "parts"
         parts_dir.mkdir(exist_ok=True)
+        missing = []
         for p in result.parts:
-            src = Path(p["file"])
-            if src.exists():
-                shutil.copy2(src, parts_dir / src.name)
+            # ``file`` is a bare filename, not a path: resolving it relative to
+            # the process CWD made every copy silently skip, and the user got
+            # an output/parts holding nothing but a manifest.
+            name = Path(p["file"]).name
+            src = Path(result.parts_dir) / name if result.parts_dir else Path(name)
+            if src.is_file():
+                shutil.copy2(src, parts_dir / name)
+            else:
+                missing.append(name)
+        if missing:
+            # Loud, because a quietly empty parts folder looks like "this
+            # object has no parts" rather than "the copy step is broken".
+            raise FileNotFoundError(
+                f"{len(missing)} part file(s) missing from {result.parts_dir}: "
+                f"{', '.join(missing[:5])}"
+            )
         src_manifest = Path(result.parts_dir) / "manifest.json" if result.parts_dir else None
         if src_manifest and src_manifest.exists():
             shutil.copy2(src_manifest, parts_dir / "manifest.json")
