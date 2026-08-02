@@ -6,8 +6,9 @@
 # CUDA-linked COLMAP. The non-obvious parts are commented — they cost an hour
 # to discover.
 #
-#   ./scripts/provision_gpu_vm.sh [instance-name] [zone] [gpu]
-#     gpu: t4 (default, plenty for COLMAP dense) | l4 (24GB, needed for TRELLIS.2)
+#   ./scripts/provision_gpu_vm.sh [instance-name] [zone] [gpu] [workload]
+#     gpu:      t4 (default, plenty for COLMAP dense) | l4 (24GB, TRELLIS.2)
+#     workload: colmap (default) | trellis
 #
 # Tear down when done:  gcloud compute instances delete <name> --zone=<zone>
 
@@ -16,6 +17,7 @@ set -euo pipefail
 NAME="${1:-pixiecad-gpu}"
 ZONE="${2:-asia-south1-a}"
 GPU="${3:-t4}"
+WORKLOAD="${4:-colmap}"
 PROJECT="${PIXIECAD_GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 
 case "$GPU" in
@@ -24,16 +26,33 @@ case "$GPU" in
   *)  echo "unknown gpu: $GPU (use t4 or l4)" >&2; exit 2 ;;
 esac
 
+case "$WORKLOAD" in
+  colmap)
+    PULL_IMAGE="colmap/colmap:latest"
+    # COLMAP dense on our inputs is minutes; an hour is already generous.
+    MAX_RUN=3600; GUARD_SLEEP=2700; DISK=100
+    ;;
+  trellis)
+    # The worker image is compiled for Ada (sm_89) only — a T4 cannot run it.
+    [ "$GPU" = "l4" ] || { echo "trellis needs --gpu l4 (image is sm_89 only)" >&2; exit 2; }
+    PULL_IMAGE="kngsly/trellis2-worker:latest"
+    # Cold start is dominated by fixed costs: ~9 GB image pull plus a model
+    # download on first /ready. Two hours leaves room for that plus real work.
+    MAX_RUN=7200; GUARD_SLEEP=6600; DISK=200
+    ;;
+  *) echo "unknown workload: $WORKLOAD (use colmap or trellis)" >&2; exit 2 ;;
+esac
+
 # The image family matters: 'common-cu124-*' does NOT exist. List current ones:
 #   gcloud compute images list --project=deeplearning-platform-release --filter="family~cu1"
 IMAGE_FAMILY="common-cu129-ubuntu-2204-nvidia-580"
 
 STARTUP=$(mktemp)
-cat > "$STARTUP" <<'EOF'
+cat > "$STARTUP" <<EOF
 #!/bin/bash
-# Guardrail: hard shutdown after 45 min so a forgotten VM cannot drain credits.
-# (--max-run-duration below is the belt to this suspenders.)
-(sleep 2700 && shutdown -h now) &
+# Guardrail: hard shutdown before max-run-duration so a forgotten VM cannot
+# drain credits. (--max-run-duration below is the belt to this suspenders.)
+(sleep $GUARD_SLEEP && shutdown -h now) &
 EOF
 
 echo "creating $NAME ($MACHINE + $ACCEL, SPOT) in $ZONE ..."
@@ -43,9 +62,9 @@ gcloud compute instances create "$NAME" \
   --project="$PROJECT" --zone="$ZONE" \
   --machine-type="$MACHINE" --accelerator="type=$ACCEL,count=1" \
   --provisioning-model=SPOT --instance-termination-action=DELETE \
-  --max-run-duration=3600s \
+  --max-run-duration=${MAX_RUN}s \
   --image-family="$IMAGE_FAMILY" --image-project=deeplearning-platform-release \
-  --boot-disk-size=100GB --boot-disk-type=pd-balanced \
+  --boot-disk-size=${DISK}GB --boot-disk-type=pd-balanced \
   --metadata-from-file=startup-script="$STARTUP" \
   --metadata=install-nvidia-driver=True
 rm -f "$STARTUP"
@@ -75,7 +94,7 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 sudo usermod -aG docker $USER
-sudo docker pull colmap/colmap:latest
+sudo docker pull '"$PULL_IMAGE"'
 '
 
 echo "registering ssh alias ..."

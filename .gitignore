@@ -14,3 +14,7 @@ demo_ws/
 ws-*/
 AGENTS.md
 .claude/
+
+# per-run session folders
+runs/
+jobs/

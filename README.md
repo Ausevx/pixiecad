@@ -14,8 +14,10 @@ pixiecad/
 ├── scripts/
 │   └── provision_gpu_vm.sh   stand up a GCP GPU VM for dense/generative stages
 ├── images/                sample F1 test set (generated, for pipeline testing)
+├── runs/                  one folder per headless run (gitignored, see below)
 ├── src/pixiecad/
 │   ├── cli.py             all commands (see below)
+│   ├── session.py         one folder per run: input/ + work/ + output/, timestamped
 │   ├── spec.py            ObjectSpec — name, target_faces, dimensions, scale source
 │   ├── workspace.py        content-addressed stage cache (every stage is resumable)
 │   ├── pipeline.py         run_build — chains every stage below into one call
@@ -46,7 +48,7 @@ pixiecad/
 │   ├── export.py            final .glb writer (mesh + UV + normal map + provenance)
 │   └── web/                 FastAPI dashboard + static/index.html (three.js viewer)
 │
-└── tests/                  154 tests, ~15s, no network/GPU required
+└── tests/                  167 tests, ~2s, no network/GPU required
 ```
 
 ### The two paths through the pipeline
@@ -60,6 +62,36 @@ pixiecad/
 usable photos survive S0, and both converge on the same finishing stages
 (clean → decimate to budget → UV/bake → export), so the CLI/dashboard command
 is identical either way.
+
+## Headless run
+
+One command, photos in and `.glb` out, with nothing to set up first:
+
+```bash
+.venv/bin/pixiecad run images/ --label "f1 car" --object "a Formula 1 race car" \
+    --faces 20000 --split --host <gpu-ssh-alias>
+```
+
+Each run gets its own timestamped folder, so runs never overwrite each other
+and an old one stays reproducible:
+
+```
+runs/
+├── latest -> 20260802-181500-f1-car     symlink to the newest run
+└── 20260802-181500-f1-car/
+    ├── session.json     what was run: source photos, regime, backend, host
+    ├── input/           the photos this run used (copied, not referenced)
+    ├── work/            workspace + stage cache — scratch, safe to delete
+    └── output/          the deliverables
+        ├── model.glb        the whole object, at your face budget
+        ├── parts/           one .glb per named part + manifest.json
+        ├── drawings/        ortho SVGs, with --drawings
+        └── build.json       per-stage status, timings, warnings
+```
+
+`--runs <dir>` puts the session folders somewhere else. Everything the run
+needs is inside its own folder — `work/` can be deleted afterwards and
+`output/` still stands on its own.
 
 ## Starting the dashboard
 
@@ -76,12 +108,23 @@ Then open **http://127.0.0.1:8000**. From there:
 4. Preview the model (three.js viewer), download the whole `.glb`
 5. If "split into parts" was checked, download each named part separately
 
+Each upload gets the same timestamped session folder as a headless run, so two
+jobs can never share or overwrite each other's photos and meshes. `GET
+/api/jobs/<id>` reports the folder in its `dir` and `output_dir` fields.
+
 Options: `--port 8080`, `--host 0.0.0.0` (to reach it from another device on
-your network), `--root <dir>` (where job workspaces are stored, default `jobs/`).
+your network), `--root <dir>` (where session folders are stored, default
+`jobs/`).
 
 ## CLI reference
 
 ```
+pixiecad run        headless end-to-end run into a fresh timestamped session folder
+                        --label "..."      names the folder
+                        --faces N          triangle budget
+                        --split --object   also export named parts
+                        --host <alias>     GPU host for dense/generative stages
+                        --drawings         also write ortho SVGs
 pixiecad init       create a workspace + ObjectSpec (name, dimensions, face budget)
 pixiecad ingest      S0 alone — score/dedupe/downscale a photo folder
 pixiecad triage      S0.5 — coverage report before you commit to reconstructing
@@ -108,13 +151,25 @@ GPU with ≥16GB (dense) or ≥24GB (TRELLIS). This machine has neither, so thos
 stages run on a rented host over SSH:
 
 ```bash
-./scripts/provision_gpu_vm.sh pixiecad-gpu asia-south1-a t4   # or: l4
-pixiecad probe --host pixiecad-gpu.asia-south1-a.<project-id>
-pixiecad build photos/ -w ws --host pixiecad-gpu.asia-south1-a.<project-id>
+# dense photogrammetry (S2b) — a T4 is plenty
+./scripts/provision_gpu_vm.sh pixiecad-gpu asia-south1-a t4 colmap
+
+# generative (S3) — needs an L4: the TRELLIS image is compiled for Ada (sm_89)
+# only, so a T4 cannot launch its kernels no matter how much VRAM it reports
+./scripts/provision_gpu_vm.sh pixiecad-l4 asia-south1-a l4 trellis
+
+pixiecad probe --host pixiecad-l4.asia-south1-a.<project-id>
+pixiecad run images/ --host pixiecad-l4.asia-south1-a.<project-id>
 ```
 
-The script installs Docker + the NVIDIA container runtime and pulls the COLMAP
-image; teardown is `gcloud compute instances delete <name> --zone=<zone>`.
+The script installs Docker + the NVIDIA container runtime and pre-pulls the
+image for the chosen workload; teardown is
+`gcloud compute instances delete <name> --zone=<zone>`.
+
+The TRELLIS worker is a service, not a batch job: PixieCAD starts it once,
+waits for `/ready` (the first boot downloads the model), then posts views to
+it over the host's own loopback — no public port is ever opened. The container
+is left running between builds so later runs skip the multi-minute model load.
 Spot instances are used by default — a preempted job is a safe no-op re-run,
 never lost work, because every stage is cached by content hash.
 
@@ -124,4 +179,4 @@ never lost work, because every stage is cached by content hash.
 PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
 ```
 
-154 tests, ~15 seconds, fully offline — no GPU, no network, no API keys.
+167 tests, ~2 seconds, fully offline — no GPU, no network, no API keys.
