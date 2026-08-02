@@ -112,8 +112,13 @@ def _run_generative(
         # Registering here is what makes "our own GPU first" the default:
         # auto-selection prefers trellis-remote over fal, and its availability
         # is decided by probing this executor's host at generate time.
-        from .generative import make_trellis_backend, register_backend
+        from .generative import (
+            make_hunyuan_backend,
+            make_trellis_backend,
+            register_backend,
+        )
 
+        register_backend(lambda: make_hunyuan_backend(executor), "hunyuan-remote")
         register_backend(lambda: make_trellis_backend(executor), "trellis-remote")
 
     for name in ("sparse", "dense"):
@@ -148,6 +153,24 @@ def _run_generative(
         "Geometry is generated, not measured: surfaces no camera saw are "
         "plausible inventions."
     )
+
+    # Structural sanity: a failed generation still yields a valid, correctly
+    # budgeted, UV-mapped glTF -- it is just not an object. Every numeric check
+    # passed on a mesh that turned out to be a cube of noise, so shape is
+    # checked explicitly and loudly rather than assumed.
+    from .meshops.sanity import check_mesh
+
+    report = check_mesh(mesh)
+    stages.append(
+        StageOutcome(
+            "sanity",
+            "ok" if report.ok else "failed",
+            report.summary(),
+            0.0,
+        )
+    )
+    for w in report.warnings:
+        warnings.append(f"Generated geometry looks wrong: {w}")
     return _mesh_tail(
         mesh,
         mesh,

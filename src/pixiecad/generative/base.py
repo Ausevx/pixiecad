@@ -65,7 +65,9 @@ _REGISTRY: dict[str, Callable[[], GenerativeBackend]] = {}
 
 # Order tried when no backend is named: self-hosted GPU first (spends existing
 # cloud credits), then fal.ai (separate paid account, configurable backup).
-AUTO_PRIORITY = ["trellis-remote", "fal"]
+# hunyuan-remote first: it is the only self-hosted option with no gated
+# dependency, so it cannot be blocked by a third party's approval queue.
+AUTO_PRIORITY = ["hunyuan-remote", "trellis-remote", "fal"]
 
 
 def register_backend(factory: Callable[[], GenerativeBackend], name: str) -> None:
