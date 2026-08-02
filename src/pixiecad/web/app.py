@@ -54,6 +54,22 @@ def _call_build(**kwargs: Any) -> Any:
     return run_build(**filtered)
 
 
+def _gcp_project() -> str:
+    """Project id from the environment, falling back to the gcloud config."""
+    project = os.environ.get("PIXIECAD_GCP_PROJECT", "").strip()
+    if project:
+        return project
+    try:
+        res = subprocess.run(
+            ["gcloud", "config", "get-value", "project"],
+            capture_output=True, text=True, timeout=30,
+        )
+        value = (res.stdout or "").strip()
+        return "" if value in {"", "(unset)"} else value
+    except Exception:
+        return ""
+
+
 class ProvisionRequest(BaseModel):
     gpu: str = "l4"
     name: str = "pixiecad-gpu"
@@ -635,10 +651,19 @@ def create_app(root: Path) -> FastAPI:
                 # The alias the executor needs; without config-ssh the host
                 # name does not resolve at all.
                 subprocess.run(["gcloud", "compute", "config-ssh", "--quiet"], timeout=300)
-                project = os.environ.get("PIXIECAD_GCP_PROJECT", "")
+                project = _gcp_project()
                 with lock:
                     provisioning["status"] = "ready"
-                    provisioning["host"] = f"{req.name}.{req.zone}.{project}".rstrip(".")
+                    # config-ssh writes aliases as name.zone.project; without
+                    # the project the alias does not resolve at all, so an
+                    # unset env var must fall back to the gcloud config rather
+                    # than silently producing a two-part name.
+                    provisioning["host"] = f"{req.name}.{req.zone}.{project}" if project else ""
+                    if not project:
+                        provisioning["log"].append(
+                            "WARNING: could not determine GCP project; set "
+                            "PIXIECAD_GCP_PROJECT or run 'gcloud config set project'"
+                        )
             except Exception as exc:
                 with lock:
                     provisioning["status"] = "failed"
