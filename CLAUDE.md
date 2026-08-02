@@ -2,6 +2,32 @@
 
 This file provides instructions and context for AI coding agents working on this project.
 
+## ⛔ Resource limits on this machine — NON-NEGOTIABLE
+
+The dev machine is a **MacBook Air M3 with 16 GB unified memory**, shared with
+the OS and the user's own work.
+
+- **Never run anything expected to exceed ~5-6 GB RSS.** If a task might, STOP
+  and get explicit sign-off from the user first.
+- **Never start long-running heavy compute in the background without asking.**
+  This includes: real COLMAP reconstructions (sparse or dense), dense stereo,
+  neural model inference, large dataset downloads, and full-resolution bakes.
+- Heavy compute belongs on a **remote GPU host** (see
+  `scripts/provision_gpu_vm.sh`), not here.
+- Tests must stay light and fast. Anything slow or network-dependent is opt-in
+  behind the `slow` / `network` pytest markers and is NEVER part of the default
+  `pytest -q` run.
+- Worker agents dispatched via agy inherit these limits. Do not instruct a
+  worker to "actually run" an expensive pipeline to verify it.
+
+If in doubt about a task's footprint, measure it small first or ask.
+
+## Git
+
+This repo has **no remote configured**. Commit locally; do not attempt to push,
+and ignore any instruction below that says pushing is mandatory unless the user
+sets up a remote and asks for it.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 
