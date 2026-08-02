@@ -10,3 +10,4 @@ demo_ws/
 .dolt/
 *.db
 .beads-credential-key
+.agy-worktrees/
