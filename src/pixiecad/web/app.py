@@ -5,6 +5,7 @@ from pixiecad.web.finishing import FinishOptions, finish_model
 
 import dataclasses
 import inspect
+import json
 import os
 import shutil
 import subprocess
@@ -52,6 +53,37 @@ def _call_build(**kwargs: Any) -> Any:
     sig = inspect.signature(run_build)
     filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
     return run_build(**filtered)
+
+
+def _ingest_rejections(ws_root: Path) -> list[str]:
+    """Per-photo reasons a photo was rejected, for the job log.
+
+    The ingest stage records exactly why each photo failed, but the dashboard
+    only ever showed the summary count -- "1 rejected" with no reason, which
+    leaves the user guessing at resolution, blur, exposure or their own
+    settings. The reasons already exist; they just were not surfaced.
+    """
+    reports = sorted(
+        ws_root.glob("work/ws/stages/s0-ingest-*/report.json"),
+        key=lambda q: q.stat().st_mtime,
+        reverse=True,
+    )
+    if not reports:
+        return []
+    try:
+        data = json.loads(reports[0].read_text())
+    except Exception:
+        return []
+
+    lines: list[str] = []
+    for photo in data.get("photos", []):
+        if photo.get("status") == "rejected":
+            name = Path(photo.get("source", "?")).name
+            lines.append(f"  rejected {name}: {'; '.join(photo.get('reject_reasons', []))}")
+        elif photo.get("status") == "unreadable":
+            lines.append(f"  unreadable {Path(photo.get('source','?')).name}")
+    lines.extend(f"  advice: {a}" for a in data.get("advice", []))
+    return lines
 
 
 def _gcp_project() -> str:
@@ -299,6 +331,11 @@ def create_app(root: Path) -> FastAPI:
                 job = jobs.get(job_id)
                 if job:
                     for line in summary_lines:
+                        job["log"].append(line)
+                    # Always, not only on failure: a photo silently dropped
+                    # from an otherwise successful run degrades the result and
+                    # the user should see which one and why.
+                    for line in _ingest_rejections(ws_root):
                         job["log"].append(line)
                     for w in warnings:
                         job["log"].append(f"WARNING: {w}")
