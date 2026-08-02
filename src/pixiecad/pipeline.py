@@ -79,6 +79,67 @@ def _ingested_images_dir(report: IngestReport) -> Path | None:
     return None
 
 
+def _run_generative(
+    *,
+    report,
+    regime: Regime,
+    ws: Workspace,
+    spec: ObjectSpec,
+    stages: list[StageOutcome],
+    warnings: list[str],
+    backend: str | None,
+    bake: bool,
+    normal_res: int,
+) -> BuildResult:
+    """Regimes with too few photos to triangulate: invent the geometry instead.
+
+    Records the photogrammetry stages as skipped (they genuinely never ran) and
+    substitutes S3. The generated mesh is its own bake source — there is no
+    higher-detail original, so the normal map only captures decimation loss.
+    """
+    from .generative import GenerateRequest, GenerativeError, run_generate
+
+    for name in ("sparse", "dense"):
+        stages.append(
+            StageOutcome(name, "skipped", f"not applicable in {regime.value} regime", 0.0)
+        )
+
+    t0 = time.monotonic()
+    images = [Path(p.working_path) for p in report.photos if p.working_path][:4]
+    try:
+        result = run_generate(GenerateRequest(images=images), ws, backend=backend)
+        mesh = trimesh.load(result.mesh_path, force="mesh", process=False)
+        stages.append(
+            StageOutcome(
+                "generate",
+                "ok",
+                f"{result.backend}: {result.n_faces} faces from {len(images)} image(s)"
+                + (" (cached)" if result.cached else ""),
+                time.monotonic() - t0,
+            )
+        )
+    except (GenerativeError, Exception) as e:
+        stages.append(StageOutcome("generate", "failed", str(e), time.monotonic() - t0))
+        _fill_skipped_stages(stages, ["scale", "clean", "decimate", "bake", "export"])
+        return BuildResult(regime, stages, None, None, None, warnings)
+
+    warnings.append(
+        "Geometry is generated, not measured: surfaces no camera saw are "
+        "plausible inventions."
+    )
+    return _mesh_tail(
+        mesh,
+        mesh,
+        ws=ws,
+        spec=spec,
+        regime=regime,
+        stages=stages,
+        warnings=warnings,
+        bake=bake,
+        normal_res=normal_res,
+    )
+
+
 def _fill_skipped_stages(stages: list[StageOutcome], remaining_stage_names: list[str]) -> None:
     for name in remaining_stage_names:
         stages.append(
@@ -99,6 +160,7 @@ def run_build(
     dense: bool = True,
     bake: bool = True,
     normal_res: int = 1024,
+    generative_backend: str | None = None,
 ) -> BuildResult:
     """Run the end-to-end PixieCAD pipeline.
 
@@ -166,8 +228,21 @@ def run_build(
 
     if regime != Regime.ORBIT:
         warnings.append(
-            f"Regime is {regime.value}: photogrammetry requires >=16 well-distributed photos. "
-            "Generative backends (not yet implemented) are required for fewer photos."
+            f"Regime is {regime.value}: photogrammetry needs >=16 well-distributed "
+            "photos of a real object. Falling back to a generative backend — "
+            "unseen surfaces will be invented, and dimensions are only as good "
+            "as the ones you declare."
+        )
+        return _run_generative(
+            report=report,
+            regime=regime,
+            ws=ws,
+            spec=spec,
+            stages=stages,
+            warnings=warnings,
+            backend=generative_backend,
+            bake=bake,
+            normal_res=normal_res,
         )
 
     # S2a Sparse
@@ -311,6 +386,37 @@ def run_build(
             warnings=warnings,
         )
 
+    return _mesh_tail(
+        mesh,
+        dense_mesh,
+        ws=ws,
+        spec=spec,
+        regime=regime,
+        stages=stages,
+        warnings=warnings,
+        bake=bake,
+        normal_res=normal_res,
+    )
+
+
+def _mesh_tail(
+    mesh,
+    dense_mesh,
+    *,
+    ws: Workspace,
+    spec: ObjectSpec,
+    regime: Regime,
+    stages: list[StageOutcome],
+    warnings: list[str],
+    bake: bool,
+    normal_res: int,
+) -> BuildResult:
+    """Scale -> clean -> decimate -> unwrap/bake -> export.
+
+    Shared by the photogrammetry and generative paths: once either has
+    produced a surface, everything downstream is identical. ``dense_mesh``
+    is the high-detail source the normal map is baked from.
+    """
     # S1 Scale
     t0 = time.monotonic()
     scale_applied: float | None = None

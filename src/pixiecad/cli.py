@@ -172,15 +172,22 @@ def build(
     host: str = typer.Option(None, help="SSH host for the GPU dense stage (omit to skip dense)"),
     bake: bool = typer.Option(True, help="Bake a normal map from the dense mesh"),
     normal_res: int = typer.Option(1024, help="Normal map resolution (px)"),
+    backend: str = typer.Option(
+        None, help="Generative backend for <16 photos (fal | trellis-remote | fake)"
+    ),
 ):
-    """Run the whole pipeline: photos in, budgeted .glb out."""
+    """Run the whole pipeline: photos in, budgeted .glb out.
+
+    With 16+ usable photos of a real object this measures it (photogrammetry).
+    With fewer, it falls back to a generative backend, which invents geometry.
+    """
     from .executors import SSHExecutor
     from .pipeline import run_build
 
     executor = SSHExecutor(host) if host else None
     result = run_build(
         photos, workspace, executor=executor, dense=bool(host),
-        bake=bake, normal_res=normal_res,
+        bake=bake, normal_res=normal_res, generative_backend=backend,
     )
 
     typer.echo(f"regime: {result.regime.value}")
@@ -230,6 +237,22 @@ def serve(
     root.mkdir(parents=True, exist_ok=True)
     typer.echo(f"pixiecad dashboard → http://{host_addr}:{port}")
     uvicorn.run(create_app(root), host=host_addr, port=port, log_level="warning")
+
+
+@app.command()
+def backends():
+    """List generative backends and whether each is usable right now."""
+    from .generative import available_backends
+    from .generative.base import _REGISTRY  # noqa: PLC2701 — introspection only
+
+    usable = set(available_backends())
+    for name in sorted(_REGISTRY):
+        mark = "✓" if name in usable else "✗"
+        note = "" if name in usable else "  (not configured)"
+        typer.echo(f"  {mark} {name}{note}")
+    if "fal" not in usable:
+        typer.echo("\nfal needs an API key:  export FAL_KEY=...")
+    typer.echo("trellis-remote needs a 24GB GPU host:  pixiecad probe --host <alias>")
 
 
 @app.command()
