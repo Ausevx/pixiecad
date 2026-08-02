@@ -36,6 +36,10 @@ case "$WORKLOAD" in
     # The worker image is compiled for Ada (sm_89) only — a T4 cannot run it.
     [ "$GPU" = "l4" ] || { echo "trellis needs --gpu l4 (image is sm_89 only)" >&2; exit 2; }
     PULL_IMAGE="kngsly/trellis2-worker:latest"
+    # HOST RAM, not VRAM, is the binding constraint at load time: the model is
+    # staged in system memory and peaks around 15 GB. g2-standard-4 has 16 GB
+    # and gets OOM-killed by the kernel every time; g2-standard-8 has 32 GB.
+    MACHINE="g2-standard-8"
     # Cold start is dominated by fixed costs: ~9 GB image pull plus a model
     # download on first /ready. Two hours leaves room for that plus real work.
     MAX_RUN=7200; GUARD_SLEEP=6600; DISK=200

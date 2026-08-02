@@ -101,7 +101,11 @@ def docker_run_command(image: str = DEFAULT_TRELLIS_IMAGE) -> str:
     """
     return (
         f"docker run -d --name {CONTAINER_NAME} --gpus all "
-        f"--restart unless-stopped "
+        # Deliberately NOT --restart unless-stopped. Loading the model needs
+        # ~15 GB of host RAM; on an undersized VM the kernel OOM-kills it, and
+        # a restart policy turns that into a silent respawn loop that burns the
+        # whole job budget. Failing once and surfacing the logs is the point.
+        f"--restart no "
         f"-p 127.0.0.1:{WORKER_PORT}:{WORKER_PORT} "
         f'-v {REMOTE_OUTPUTS_DIR}:/outputs '
         f'-v "$HOME/.cache/huggingface":/root/.cache/huggingface '
@@ -158,6 +162,15 @@ fi
 tries=0
 while :; do
   if curl -sf --max-time 10 {url}/ready | grep -q '"ready"[ ]*:[ ]*true'; then break; fi
+  # A dead container will never become ready, so stop waiting the moment it
+  # exits rather than burning the full timeout on a corpse. An OOM kill shows
+  # up here as a non-running container with exit code 137.
+  if [ -z "$(docker ps -q -f name=^{CONTAINER_NAME}$ -f status=running)" ]; then
+    echo "TRELLIS worker exited during startup (code $(docker inspect -f '{{{{.State.ExitCode}}}}' {CONTAINER_NAME} 2>/dev/null))" >&2
+    echo "exit 137 means the host kernel OOM-killed it: the model needs ~15 GB of RAM, so use a VM with 32 GB (g2-standard-8), not 16 GB (g2-standard-4)." >&2
+    docker logs --tail 40 {CONTAINER_NAME} >&2 || true
+    exit 1
+  fi
   tries=$((tries+1))
   if [ "$tries" -ge {ready_tries} ]; then
     echo "TRELLIS worker not ready after {ready_timeout_s}s" >&2
