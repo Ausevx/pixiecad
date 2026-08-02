@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import shutil
 import threading
 from pathlib import Path
@@ -15,7 +16,6 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from ..export import export_glb
-from ..ingest.pipeline import run_ingest
 from ..meshops import bake_object_space_normals, clean_mesh, decimate_to_budget, unwrap_uv
 from ..spec import Dimensions, ObjectSpec
 from ..workspace import Workspace
@@ -23,6 +23,16 @@ from ..workspace import Workspace
 
 class OptimizeRequest(BaseModel):
     target_faces: int = Field(..., gt=0)
+    normal_res: int = Field(1024, ge=64, le=4096)
+
+
+def _call_build(**kwargs: Any) -> Any:
+    import pixiecad.generative  # noqa: F401  (registers fake backend)
+    from pixiecad.pipeline import run_build
+
+    sig = inspect.signature(run_build)
+    filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    return run_build(**filtered)
 
 
 def create_app(root: Path) -> FastAPI:
@@ -37,8 +47,14 @@ def create_app(root: Path) -> FastAPI:
 
     static_index = Path(__file__).parent / "static" / "index.html"
 
-    def _run_mesh_stages_sync(job_id: str, ws_root: Path, target_faces: int) -> None:
+    def _run_mesh_stages_sync(
+        job_id: str, ws_root: Path, target_faces: int, normal_res: int = 1024
+    ) -> None:
         dense_ply = ws_root / "dense.ply"
+        if not dense_ply.exists() and ws_root.parent.exists():
+            dense_ply = ws_root.parent / "dense.ply"
+        if not dense_ply.exists():
+            dense_ply = ws_root / "ws" / "dense.ply"
         if not dense_ply.exists():
             raise FileNotFoundError("dense.ply not found")
 
@@ -74,7 +90,9 @@ def create_app(root: Path) -> FastAPI:
                 job["stage"] = "bake"
                 job["log"].append("Baking object-space normal map...")
 
-        normal_map = bake_object_space_normals(dense_mesh, unwrap_res.mesh)
+        normal_map = bake_object_space_normals(
+            dense_mesh, unwrap_res.mesh, resolution=normal_res
+        )
 
         with lock:
             job = jobs.get(job_id)
@@ -93,46 +111,105 @@ def create_app(root: Path) -> FastAPI:
                 job["glb_url"] = f"/api/jobs/{job_id}/model.glb"
                 job["log"].append("GLB model export complete.")
 
-    def _job_worker(job_id: str, ws_root: Path, target_faces: int) -> None:
+    def _job_worker(
+        job_id: str,
+        ws_root: Path,
+        target_faces: int,
+        backend: str | None = None,
+        split: bool = True,
+        object_hint: str | None = None,
+    ) -> None:
         with lock:
             job = jobs.get(job_id)
             if not job:
                 return
             job["status"] = "running"
-            job["stage"] = "ingest"
-            job["log"].append("Starting photo ingest pipeline...")
+            job["stage"] = "build"
+            job["log"].append("Starting full pipeline build...")
 
         try:
-            ws = Workspace.open(ws_root)
             photos_dir = ws_root / "photos"
-            report = run_ingest(photos_dir, ws)
+            ws_dir = ws_root / "ws"
 
-            report_dict = dataclasses.asdict(report)
+            result = _call_build(
+                photos_dir=photos_dir,
+                workspace=ws_dir,
+                dense=False,
+                bake=False,
+                generative_backend=backend,
+                split=split,
+                object_hint=object_hint,
+            )
+
+            regime_val = (
+                result.regime.value
+                if hasattr(result.regime, "value")
+                else (str(result.regime) if getattr(result, "regime", None) else None)
+            )
+            glb_path = getattr(result, "glb_path", None)
+            faces = getattr(result, "faces", None)
+            parts_raw = getattr(result, "parts", None)
+            parts_dir = getattr(result, "parts_dir", None)
+            warnings = getattr(result, "warnings", None) or []
+
+            # If split requested and run_build didn't compute parts, compute them on output mesh
+            if split and (parts_raw is None or len(parts_raw) == 0) and glb_path and Path(glb_path).exists():
+                try:
+                    from pixiecad.parts import export_parts, split_parts
+
+                    loaded_mesh = trimesh.load(glb_path, force="mesh", process=False)
+                    if isinstance(loaded_mesh, trimesh.Scene):
+                        loaded_mesh = loaded_mesh.to_mesh()
+                    parts_objs = split_parts(loaded_mesh, method="auto", max_parts=8)
+                    p_dir = Path(glb_path).parent / "parts"
+                    exp_parts, _ = export_parts(
+                        parts_objs,
+                        p_dir,
+                        total_budget=faces or 20000,
+                    )
+                    parts_raw = [dataclasses.asdict(p) for p in exp_parts]
+                    parts_dir = str(p_dir)
+                except Exception:
+                    parts_raw = []
+
+            parts = []
+            if parts_raw:
+                for p in parts_raw:
+                    p_dict = dict(p) if isinstance(p, dict) else dataclasses.asdict(p)
+                    p_file = p_dict.get("file") or p_dict.get("name")
+                    p_dict["url"] = f"/api/jobs/{job_id}/parts/{p_file}"
+                    parts.append(p_dict)
+
+            summary_lines = result.summary_lines() if hasattr(result, "summary_lines") else []
+
             with lock:
                 job = jobs.get(job_id)
                 if job:
-                    job["report"] = report_dict
-                    job["log"].append(
-                        f"Ingest complete: accepted={report.accepted}, "
-                        f"duplicates={report.duplicates}, rejected={report.rejected}, "
-                        f"unreadable={report.unreadable}."
-                    )
-                    job["stage"] = "ingest_complete"
+                    for line in summary_lines:
+                        job["log"].append(line)
+                    for w in warnings:
+                        job["log"].append(f"WARNING: {w}")
 
-            dense_ply = ws_root / "dense.ply"
-            if dense_ply.exists():
-                _run_mesh_stages_sync(job_id, ws_root, target_faces)
-            else:
-                with lock:
-                    job = jobs.get(job_id)
-                    if job:
+                    job["regime"] = regime_val
+                    job["glb_path"] = glb_path
+                    job["faces"] = faces
+                    job["parts"] = parts
+                    job["parts_dir"] = str(parts_dir) if parts_dir else None
+                    job["warnings"] = warnings
+
+                    if glb_path:
                         job["status"] = "done"
-                        job["log"].append("Pipeline complete (no dense.ply for mesh reconstruction).")
+                        job["stage"] = "complete"
+                        job["glb_url"] = f"/api/jobs/{job_id}/model.glb"
+                    else:
+                        job["status"] = "failed"
+                        job["stage"] = "failed"
         except Exception as exc:
             with lock:
                 job = jobs.get(job_id)
                 if job:
                     job["status"] = "failed"
+                    job["stage"] = "failed"
                     job["log"].append(f"Pipeline failed: {exc}")
 
     @app.get("/", response_class=HTMLResponse)
@@ -149,6 +226,10 @@ def create_app(root: Path) -> FastAPI:
         length: str | None = Form(None),
         width: str | None = Form(None),
         height: str | None = Form(None),
+        mode: str = Form("auto"),
+        split: bool = Form(True),
+        object_hint: str | None = Form(None),
+        backend: str | None = Form(None),
     ):
         job_id = uuid4().hex[:8]
         job_dir = root / job_id
@@ -167,7 +248,11 @@ def create_app(root: Path) -> FastAPI:
         dims = Dimensions.parse(length=l_val, width=w_val, height=h_val)
         spec = ObjectSpec(name=name or "object", target_faces=target_faces, dimensions=dims)
 
-        ws = Workspace.create(job_dir, spec)
+        ws_dir = job_dir / "ws"
+        Workspace.create(ws_dir, spec)
+
+        backend_val = backend.strip() if backend and backend.strip() else None
+        hint_val = object_hint.strip() if object_hint and object_hint.strip() else None
 
         job_info: dict[str, Any] = {
             "job_id": job_id,
@@ -179,6 +264,15 @@ def create_app(root: Path) -> FastAPI:
             "report": None,
             "glb_url": None,
             "dir": str(job_dir),
+            "regime": None,
+            "faces": None,
+            "parts": [],
+            "parts_dir": None,
+            "warnings": [],
+            "mode": mode,
+            "split": split,
+            "object_hint": hint_val,
+            "backend": backend_val,
         }
 
         with lock:
@@ -186,7 +280,7 @@ def create_app(root: Path) -> FastAPI:
 
         thread = threading.Thread(
             target=_job_worker,
-            args=(job_id, job_dir, target_faces),
+            args=(job_id, job_dir, target_faces, backend_val, split, hint_val),
             daemon=True,
         )
         thread.start()
@@ -222,7 +316,44 @@ def create_app(root: Path) -> FastAPI:
                 "log": list(job["log"]),
                 "report": job["report"],
                 "glb_url": job["glb_url"],
+                "regime": job.get("regime"),
+                "faces": job.get("faces"),
+                "parts": job.get("parts", []),
+                "warnings": job.get("warnings", []),
             }
+
+    @app.get("/api/jobs/{job_id}/parts/{filename:path}")
+    def get_job_part(job_id: str, filename: str):
+        with lock:
+            job = jobs.get(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail="Job not found")
+            parts_dir_str = job.get("parts_dir")
+
+        if not parts_dir_str:
+            raise HTTPException(status_code=404, detail="Parts directory not found")
+
+        parts_dir = Path(parts_dir_str).resolve()
+        if not parts_dir.exists() or not parts_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Parts directory not found")
+
+        try:
+            target_file = (parts_dir / filename).resolve()
+            target_file.relative_to(parts_dir)
+        except (ValueError, Exception):
+            raise HTTPException(status_code=400, detail="Invalid file path")
+
+        if target_file == parts_dir:
+            raise HTTPException(status_code=400, detail="Invalid file path")
+
+        if not target_file.exists() or not target_file.is_file():
+            raise HTTPException(status_code=404, detail="Part file not found")
+
+        return FileResponse(
+            path=target_file,
+            media_type="model/gltf-binary",
+            filename=target_file.name,
+        )
 
     @app.post("/api/jobs/{job_id}/optimize")
     def optimize_job(job_id: str, req: OptimizeRequest):
@@ -234,6 +365,8 @@ def create_app(root: Path) -> FastAPI:
 
         dense_ply = job_dir / "dense.ply"
         if not dense_ply.exists():
+            dense_ply = job_dir / "ws" / "dense.ply"
+        if not dense_ply.exists():
             raise HTTPException(
                 status_code=409,
                 detail="Dense mesh (dense.ply) not found for this job",
@@ -242,13 +375,14 @@ def create_app(root: Path) -> FastAPI:
         with lock:
             job["target_faces"] = req.target_faces
 
-        ws = Workspace.open(job_dir)
+        ws_dir = job_dir / "ws" if (job_dir / "ws").exists() else job_dir
+        ws = Workspace.open(ws_dir)
         spec = ws.spec()
         spec.target_faces = req.target_faces
         ws.update_spec(spec)
 
         try:
-            _run_mesh_stages_sync(job_id, job_dir, req.target_faces)
+            _run_mesh_stages_sync(job_id, ws_dir, req.target_faces, req.normal_res)
         except Exception as exc:
             with lock:
                 job["status"] = "failed"
@@ -271,8 +405,11 @@ def create_app(root: Path) -> FastAPI:
             if not job:
                 raise HTTPException(status_code=404, detail="Job not found")
             job_dir = Path(job["dir"])
+            stored_glb = job.get("glb_path")
 
-        glb_path = job_dir / "model.glb"
+        glb_path = Path(stored_glb) if stored_glb else (job_dir / "ws" / "output" / f"{job['name']}.glb")
+        if not glb_path.exists():
+            glb_path = job_dir / "model.glb"
         if not glb_path.exists():
             raise HTTPException(status_code=404, detail="Model GLB not found")
 

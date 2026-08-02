@@ -94,7 +94,9 @@ def test_optimize_no_dense_mesh(client):
     )
     job_id = res.json()["job_id"]
 
-    res_opt = client.post(f"/api/jobs/{job_id}/optimize", json={"target_faces": 5000})
+    res_opt = client.post(
+        f"/api/jobs/{job_id}/optimize", json={"target_faces": 5000, "normal_res": 128}
+    )
     assert res_opt.status_code == 409
 
 
@@ -104,11 +106,8 @@ def test_get_unknown_job(client):
 
 
 def test_get_cloud(client, monkeypatch):
-    res = client.get("/api/cloud")
-    assert res.status_code == 200
-    data = res.json()
-    assert "available" in data
-
+    # The stub must be installed BEFORE any request: the unstubbed endpoint
+    # shells out to real gcloud (~10s and environment-dependent).
     @dataclass
     class Gcloud:
         installed: bool = True
@@ -168,7 +167,9 @@ def test_optimize_with_dense_mesh(tmp_path: Path):
     mesh = trimesh.creation.icosphere(subdivisions=2)
     mesh.export(job_dir / "dense.ply")
 
-    opt_res = client.post(f"/api/jobs/{job_id}/optimize", json={"target_faces": 50})
+    opt_res = client.post(
+        f"/api/jobs/{job_id}/optimize", json={"target_faces": 50, "normal_res": 128}
+    )
     assert opt_res.status_code == 200
     opt_data = opt_res.json()
     assert opt_data["status"] == "done"
@@ -177,4 +178,61 @@ def test_optimize_with_dense_mesh(tmp_path: Path):
     glb_res = client.get(f"/api/jobs/{job_id}/model.glb")
     assert glb_res.status_code == 200
     assert len(glb_res.content) > 0
+
+
+def test_full_pipeline_fake_backend_and_parts(client):
+    import time
+
+    img1 = _generate_test_jpeg(1)
+    img2 = _generate_test_jpeg(2)
+
+    files = [
+        ("files", ("photo1.jpg", img1, "image/jpeg")),
+        ("files", ("photo2.jpg", img2, "image/jpeg")),
+    ]
+    data = {
+        "name": "fake_test",
+        "backend": "fake",
+        "split": "true",
+        "object_hint": "table",
+    }
+
+    res = client.post("/api/jobs", files=files, data=data)
+    assert res.status_code == 200
+    job_id = res.json()["job_id"]
+
+    # Poll until done (max 30s)
+    deadline = time.time() + 30
+    detail = None
+    while time.time() < deadline:
+        detail_res = client.get(f"/api/jobs/{job_id}")
+        assert detail_res.status_code == 200
+        detail = detail_res.json()
+        if detail["status"] in ("done", "failed"):
+            break
+        time.sleep(0.1)
+
+    assert detail is not None
+    assert detail["status"] == "done", f"Job failed, logs: {detail.get('log')}"
+    assert detail["regime"] == "sparse_views"
+    assert detail["glb_url"] is not None
+    assert "parts" in detail and len(detail["parts"]) > 0
+    for part in detail["parts"]:
+        assert "url" in part and part["url"]
+
+    # Download a part via new endpoint
+    part0 = detail["parts"][0]
+    part_res = client.get(part0["url"])
+    assert part_res.status_code == 200
+    assert len(part_res.content) > 0
+
+    # Path traversal rejection -> 400 or 404, never 200
+    bad_res = client.get(f"/api/jobs/{job_id}/parts/../../etc/passwd")
+    assert bad_res.status_code in (400, 404)
+    assert bad_res.status_code != 200
+
+    # Unknown job for parts endpoint -> 404
+    unknown_res = client.get("/api/jobs/unknown-id/parts/part-0.glb")
+    assert unknown_res.status_code == 404
+
 

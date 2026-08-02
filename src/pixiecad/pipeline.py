@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 import time
@@ -15,8 +15,10 @@ from .geometry.dense import DenseUnavailable, run_dense
 from .geometry.sparse import SparseFailure, SparseResult, run_sparse
 from .ingest.pipeline import IngestReport, run_ingest
 from .meshops import bake_object_space_normals, clean_mesh, decimate_to_budget, unwrap_uv
+from .parts import export_parts, split_parts
 from .scale.transform import apply_scale, scale_factor_from_dimensions
 from .spec import ObjectSpec
+from .vision.triage import name_parts
 from .workspace import Workspace
 
 
@@ -54,6 +56,8 @@ class BuildResult:
     faces: int | None
     scale_applied: float | None
     warnings: list[str]
+    parts_dir: str | None = None
+    parts: list[dict] = field(default_factory=list)
 
     def summary_lines(self) -> list[str]:
         """Return human-readable summary lines, one per stage."""
@@ -90,6 +94,9 @@ def _run_generative(
     backend: str | None,
     bake: bool,
     normal_res: int,
+    split: bool = False,
+    max_parts: int = 8,
+    object_hint: str | None = None,
 ) -> BuildResult:
     """Regimes with too few photos to triangulate: invent the geometry instead.
 
@@ -137,6 +144,9 @@ def _run_generative(
         warnings=warnings,
         bake=bake,
         normal_res=normal_res,
+        split=split,
+        max_parts=max_parts,
+        object_hint=object_hint,
     )
 
 
@@ -161,6 +171,9 @@ def run_build(
     bake: bool = True,
     normal_res: int = 1024,
     generative_backend: str | None = None,
+    split: bool = False,
+    max_parts: int = 8,
+    object_hint: str | None = None,
 ) -> BuildResult:
     """Run the end-to-end PixieCAD pipeline.
 
@@ -243,6 +256,9 @@ def run_build(
             backend=generative_backend,
             bake=bake,
             normal_res=normal_res,
+            split=split,
+            max_parts=max_parts,
+            object_hint=object_hint,
         )
 
     # S2a Sparse
@@ -396,6 +412,9 @@ def run_build(
         warnings=warnings,
         bake=bake,
         normal_res=normal_res,
+        split=split,
+        max_parts=max_parts,
+        object_hint=object_hint,
     )
 
 
@@ -410,6 +429,9 @@ def _mesh_tail(
     warnings: list[str],
     bake: bool,
     normal_res: int,
+    split: bool = False,
+    max_parts: int = 8,
+    object_hint: str | None = None,
 ) -> BuildResult:
     """Scale -> clean -> decimate -> unwrap/bake -> export.
 
@@ -472,6 +494,7 @@ def _mesh_tail(
     t0 = time.monotonic()
     try:
         mesh, clean_report = clean_mesh(mesh)
+        cleaned_mesh = mesh
         dt = time.monotonic() - t0
         stages.append(
             StageOutcome(
@@ -628,6 +651,55 @@ def _mesh_tail(
             warnings=warnings,
         )
 
+    parts_dir: str | None = None
+    parts_info: list[dict] = []
+    if split:
+        t0 = time.monotonic()
+        try:
+            parts = split_parts(cleaned_mesh, max_parts=max_parts)
+            named_parts = name_parts(parts, cleaned_mesh, object_hint=object_hint)
+            parts_out_dir = ws.root / "output" / "parts"
+            exported_parts, _ = export_parts(
+                named_parts,
+                parts_out_dir,
+                total_budget=spec.target_faces,
+                whole_volume=cleaned_mesh.volume,
+                extras={"regime": regime.value},
+            )
+            parts_dir = str(parts_out_dir)
+            parts_info = [
+                {
+                    "name": p.name,
+                    "file": p.file,
+                    "faces": p.faces,
+                    "target_faces": p.target_faces,
+                }
+                for p in exported_parts
+            ]
+            first_names = [p.name for p in exported_parts[:4]]
+            detail_str = f"{len(exported_parts)} parts: {', '.join(first_names)}"
+            if len(exported_parts) > 4:
+                detail_str += ", ..."
+            dt = time.monotonic() - t0
+            stages.append(
+                StageOutcome(
+                    name="parts",
+                    status="ok",
+                    detail=detail_str,
+                    seconds=dt,
+                )
+            )
+        except Exception as e:
+            dt = time.monotonic() - t0
+            stages.append(
+                StageOutcome(
+                    name="parts",
+                    status="failed",
+                    detail=str(e),
+                    seconds=dt,
+                )
+            )
+
     return BuildResult(
         regime=regime,
         stages=stages,
@@ -635,4 +707,6 @@ def _mesh_tail(
         faces=faces,
         scale_applied=scale_applied,
         warnings=warnings,
+        parts_dir=parts_dir,
+        parts=parts_info,
     )

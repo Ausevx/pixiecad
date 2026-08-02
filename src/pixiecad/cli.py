@@ -175,11 +175,17 @@ def build(
     backend: str = typer.Option(
         None, help="Generative backend for <16 photos (fal | trellis-remote | fake)"
     ),
+    split: bool = typer.Option(False, "--split", help="Also export named parts"),
+    max_parts: int = typer.Option(8, help="Maximum number of parts when splitting"),
+    object_hint: str = typer.Option(
+        None, "--object", help="What the object is (improves part naming), e.g. 'an F1 car'"
+    ),
 ):
     """Run the whole pipeline: photos in, budgeted .glb out.
 
     With 16+ usable photos of a real object this measures it (photogrammetry).
     With fewer, it falls back to a generative backend, which invents geometry.
+    --split additionally exports each component as its own .glb.
     """
     from .executors import SSHExecutor
     from .pipeline import run_build
@@ -188,6 +194,7 @@ def build(
     result = run_build(
         photos, workspace, executor=executor, dense=bool(host),
         bake=bake, normal_res=normal_res, generative_backend=backend,
+        split=split, max_parts=max_parts, object_hint=object_hint,
     )
 
     typer.echo(f"regime: {result.regime.value}")
@@ -199,6 +206,8 @@ def build(
         typer.echo(f"scale: ×{result.scale_applied:.4f} (metric)")
     if result.glb_path:
         typer.echo(f"✓ {result.glb_path} ({result.faces} faces)")
+        for p in result.parts:
+            typer.echo(f"    part: {p['name']:<24} {p['faces']:>6} faces  {p['file']}")
     else:
         typer.echo("no model produced — see stage statuses above", err=True)
         raise typer.Exit(1)
