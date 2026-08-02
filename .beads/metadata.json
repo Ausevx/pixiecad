@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "pixiecad",
+  "project_id": "27439579-82c9-4262-b438-429faabb9731"
+}
