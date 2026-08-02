@@ -115,5 +115,55 @@ def probe(
     typer.echo(f"{caps.hostname}: {gpu}")
 
 
+@app.command()
+def optimize(
+    mesh_file: Path = typer.Argument(..., exists=True, help="Dense mesh (.ply/.obj/.glb/.stl)"),
+    out: Path = typer.Option("model.glb", "--out", "-o", help="Output .glb path"),
+    target_faces: int = typer.Option(20_000, "--target-faces", "-t", help="Exact triangle budget"),
+    bake: bool = typer.Option(True, help="Bake an object-space normal map from the dense mesh"),
+    resolution: int = typer.Option(1024, help="Normal map resolution (px)"),
+):
+    """S4→S6: cleanup → exact-budget decimation → UV unwrap → normal bake → .glb."""
+    import trimesh
+
+    from .export import export_glb
+    from .meshops import (
+        bake_object_space_normals,
+        clean_mesh,
+        decimate_to_budget,
+        unwrap_uv,
+    )
+
+    loaded = trimesh.load(mesh_file, force="mesh", process=False)
+    typer.echo(f"loaded: {len(loaded.faces)} faces")
+
+    cleaned, crep = clean_mesh(loaded)
+    typer.echo(
+        f"cleanup: {crep.faces_before} → {crep.faces_after} faces, "
+        f"{crep.components_removed} floater(s) removed, watertight={crep.watertight}"
+    )
+
+    low, drep = decimate_to_budget(cleaned, target_faces)
+    exact = "exact" if drep.achieved_exact else "closest achievable"
+    typer.echo(f"decimate: {drep.faces_after} faces (target {target_faces}, {exact})")
+
+    unwrapped = unwrap_uv(low)
+    normal_map = None
+    if bake:
+        normal_map = bake_object_space_normals(
+            cleaned, unwrapped.mesh, resolution=resolution
+        )
+        typer.echo(f"baked {resolution}x{resolution} object-space normal map")
+
+    path = export_glb(
+        unwrapped.mesh,
+        out,
+        normal_map=normal_map,
+        extras={"generator": "pixiecad", "source_faces": crep.faces_before,
+                "target_faces": target_faces},
+    )
+    typer.echo(f"wrote {path} ({path.stat().st_size / 1024:.0f} KB)")
+
+
 if __name__ == "__main__":
     app()

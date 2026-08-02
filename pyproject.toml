@@ -14,7 +14,7 @@ dependencies = [
 [project.optional-dependencies]
 bgremoval = ["rembg>=2.0"]
 sfm = ["pycolmap>=3.10"]
-mesh = ["trimesh>=4.0", "pyfqmr>=0.2", "xatlas>=0.0.9"]
+mesh = ["trimesh>=4.0", "pyfqmr>=0.2", "xatlas>=0.0.9", "rtree>=1.2"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
