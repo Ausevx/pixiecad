@@ -306,3 +306,30 @@ def test_gated_repo_failure_explains_the_fix(tmp_path: Path) -> None:
     msg = str(exc.value)
     assert "HF_TOKEN" in msg
     assert "dinov3" in msg
+
+
+def test_resolve_hf_token_prefers_env_then_file(tmp_path: Path, monkeypatch) -> None:
+    """An interactive `export` never reaches a build shell; the file must work."""
+    from pixiecad.generative.trellis_remote import resolve_hf_token
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    assert resolve_hf_token() is None
+
+    (tmp_path / "token").write_text("hf_from_file\n")
+    assert resolve_hf_token() == "hf_from_file"
+
+    # An explicit env var wins over the stored login.
+    monkeypatch.setenv("HF_TOKEN", "hf_from_env")
+    assert resolve_hf_token() == "hf_from_env"
+
+
+def test_resolve_hf_token_ignores_blank_values(tmp_path: Path, monkeypatch) -> None:
+    """An empty export must not read as 'authenticated'."""
+    from pixiecad.generative.trellis_remote import resolve_hf_token
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.setenv("HF_TOKEN", "   ")
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    assert resolve_hf_token() is None

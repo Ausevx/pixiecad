@@ -457,6 +457,45 @@ def triage(
 
 
 @app.command()
+def hfcheck():
+    """Verify a HuggingFace token can reach TRELLIS.2's gated dependency.
+
+    Worth one HTTP request before provisioning: without access the GPU worker
+    downloads 19 GB and loads for minutes before failing with a 401.
+    """
+    import urllib.error
+    import urllib.request
+
+    from .generative.trellis_remote import GATED_REPO, resolve_hf_token
+
+    token = resolve_hf_token()
+    if not token:
+        typer.echo("no token found (checked HF_TOKEN, HUGGING_FACE_HUB_TOKEN, ~/.cache/huggingface/token)", err=True)
+        typer.echo("fix:  huggingface-cli login    (or export HF_TOKEN=hf_...)")
+        raise typer.Exit(1)
+
+    typer.echo(f"token found ({len(token)} chars)")
+    url = f"https://huggingface.co/{GATED_REPO}/resolve/main/config.json"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read(1)
+        typer.echo(f"✓ {GATED_REPO} is accessible — the generative backend can run")
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            typer.echo(f"✗ {GATED_REPO} returned {e.code}", err=True)
+            typer.echo(f"  accept the licence at https://huggingface.co/{GATED_REPO}")
+            typer.echo("  and make sure the token has read access to gated repos")
+        else:
+            typer.echo(f"✗ unexpected HTTP {e.code}: {e.reason}", err=True)
+        raise typer.Exit(1)
+    except Exception as e:
+        # Never let a token reach the terminal via an exception message.
+        typer.echo(f"✗ could not reach HuggingFace: {type(e).__name__}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command()
 def backends():
     """List generative backends and whether each is usable right now."""
     from .generative import available_backends

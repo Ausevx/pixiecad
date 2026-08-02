@@ -36,6 +36,10 @@ DEFAULT_TRELLIS_IMAGE = "kngsly/trellis2-worker:latest"
 # (8.0) or H100 (9.0). Hence an exact allow-list, not a minimum.
 TRELLIS_SUPPORTED_COMPUTE_CAPS = (8.9,)
 
+# TRELLIS.2's image encoder. Gated: access must be granted per-account, and the
+# 401 only appears after ~19 GB of unrelated weights have already downloaded.
+GATED_REPO = "facebook/dinov3-vitl16-pretrain-lvd1689m"
+
 CONTAINER_NAME = "pixiecad-trellis"
 WORKER_PORT = 8000
 # Written on the remote host, outside the per-job dir, so the model cache and
@@ -232,6 +236,28 @@ print("wrote out/mesh.glb from %s" % src)
 PYEOF"""
 
 
+def resolve_hf_token() -> str | None:
+    """Find a HuggingFace token the way huggingface_hub itself does.
+
+    Checks both env vars, then the file written by ``huggingface-cli login``.
+    Reading the file matters because an interactive ``export`` does not reach a
+    non-interactive shell, which is where builds actually run.
+    """
+    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        value = os.environ.get(var)
+        if value and value.strip():
+            return value.strip()
+
+    token_file = Path(
+        os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")
+    ) / "token"
+    try:
+        value = token_file.read_text().strip()
+    except OSError:
+        return None
+    return value or None
+
+
 def _gpu_supported(caps: Any) -> bool:
     """True when ``caps`` describes a GPU this image's kernels will run on."""
     if not caps.cuda_ok(TRELLIS_MIN_VRAM_MB):
@@ -317,9 +343,7 @@ class RemoteTrellisBackend:
 
             # Staged as a file in the job's input dir so it travels over the
             # same rsync as the images and never touches a command line.
-            hf_token = os.environ.get("HF_TOKEN") or os.environ.get(
-                "HUGGING_FACE_HUB_TOKEN"
-            )
+            hf_token = resolve_hf_token()
             if hf_token:
                 token_file = tmp_path / "hf_token"
                 token_file.write_text(hf_token.strip())
