@@ -22,6 +22,42 @@ def _roughness(mesh: trimesh.Trimesh) -> float:
     return float(r.std())
 
 
+class TestWeldNormals:
+    def test_seam_duplicates_get_the_same_normal(self):
+        """The fix for shading creases along UV seams."""
+        from pixiecad.meshops.smooth import weld_normals
+
+        mesh = trimesh.creation.icosphere(subdivisions=2)
+        extra = mesh.faces[0]
+        verts = np.vstack([mesh.vertices, mesh.vertices[extra]])
+        faces = mesh.faces.copy()
+        faces[0] = [len(mesh.vertices) + i for i in range(3)]
+        seamed = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+
+        welded = weld_normals(seamed)
+        for original, duplicate in zip(extra, faces[0]):
+            assert np.allclose(
+                welded.vertex_normals[original], welded.vertex_normals[duplicate], atol=1e-6
+            )
+
+    def test_geometry_is_untouched(self):
+        """Free means free: no vertex or face may move."""
+        from pixiecad.meshops.smooth import weld_normals
+
+        mesh = _noisy_sphere()
+        out = weld_normals(mesh)
+        assert np.array_equal(out.vertices, mesh.vertices)
+        assert np.array_equal(out.faces, mesh.faces)
+
+    def test_empty_mesh(self):
+        from pixiecad.meshops.smooth import weld_normals
+
+        empty = trimesh.Trimesh(
+            vertices=np.zeros((0, 3)), faces=np.zeros((0, 3), dtype=np.int64)
+        )
+        assert len(weld_normals(empty).faces) == 0
+
+
 class TestSmoothMesh:
     def test_reduces_high_frequency_noise(self):
         noisy = _noisy_sphere()

@@ -84,6 +84,17 @@ def finish_model(
 
     mesh = trimesh.load(glb_path, force="mesh", process=False)
 
+    # Always, and first: costs nothing and is the single biggest visual win.
+    # Measured on the F1, 90% of 4,800 UV-seam vertices had their shading
+    # normals split by more than 10 degrees (mean 56, max 180), drawn by every
+    # renderer as a hard crease. That reads as "the polygons are showing" and
+    # sends people reaching for a higher face budget, which does not fix it.
+    from ..meshops.smooth import weld_normals
+
+    mesh = weld_normals(mesh)
+    mesh.export(glb_path)
+    report.steps.append("weld_normals")
+
     if options.smooth_iterations > 0:
         from ..meshops.smooth import smooth_mesh
 

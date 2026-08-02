@@ -63,6 +63,34 @@ def _neighbour_sums(
     return total, count
 
 
+def weld_normals(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Recompute vertex normals across UV seams. Free: geometry is untouched.
+
+    A textured mesh duplicates vertices along every UV seam -- our F1 carries
+    17,848 vertices for 14,873 distinct positions. trimesh averages face
+    normals per *index*, so each copy of a seam vertex only sees the faces on
+    its own side and the two sides disagree. The renderer then draws a hard
+    crease along every seam, which reads as faceting even though the geometry
+    is perfectly continuous there.
+
+    Averaging on welded topology and scattering the result back fixes the
+    shading without adding a single vertex or triangle, so it costs nothing in
+    the polygon budget and nothing at runtime.
+    """
+    out = mesh.copy()
+    if not len(mesh.faces):
+        return out
+
+    unique, inverse = _welded(mesh)
+    welded = trimesh.Trimesh(
+        vertices=np.asarray(mesh.vertices)[unique],
+        faces=inverse[np.asarray(mesh.faces)],
+        process=False,
+    )
+    out.vertex_normals = np.asarray(welded.vertex_normals)[inverse]
+    return out
+
+
 def smooth_mesh(
     mesh: trimesh.Trimesh,
     *,

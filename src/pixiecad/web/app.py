@@ -5,7 +5,9 @@ from pixiecad.web.finishing import FinishOptions, finish_model
 
 import dataclasses
 import inspect
+import os
 import shutil
+import subprocess
 import threading
 from pathlib import Path
 from typing import Any
@@ -52,6 +54,19 @@ def _call_build(**kwargs: Any) -> Any:
     return run_build(**filtered)
 
 
+class ProvisionRequest(BaseModel):
+    gpu: str = "l4"
+    name: str = "pixiecad-gpu"
+    zone: str = "asia-southeast1-b"
+    texture: bool = True
+    semantic: bool = True
+
+
+class TeardownRequest(BaseModel):
+    name: str = "pixiecad-gpu"
+    zone: str = "asia-southeast1-b"
+
+
 def create_app(root: Path) -> FastAPI:
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -61,6 +76,9 @@ def create_app(root: Path) -> FastAPI:
 
     # In-process dict storing jobs state
     jobs: dict[str, dict[str, Any]] = {}
+    # Single in-flight provision: two concurrent builds on one project would
+    # race for the same L4 quota of 1 and both fail confusingly.
+    provisioning: dict[str, Any] = {}
 
     static_index = Path(__file__).parent / "static" / "index.html"
 
@@ -547,6 +565,93 @@ def create_app(root: Path) -> FastAPI:
                 detail="no web export for this job; enable 'Optimise for web'",
             )
         return FileResponse(web, media_type="model/gltf-binary", filename="model_web.glb")
+
+    @app.get("/api/gpu-options")
+    def gpu_options(texture: bool = True, semantic: bool = True):
+        """Hardware choices with measured-where-possible time and cost."""
+        from pixiecad.cloud_options import options_payload
+
+        return {"options": options_payload(texture=texture, semantic=semantic)}
+
+    @app.post("/api/cloud/provision")
+    def provision(req: ProvisionRequest):
+        """Create a GPU VM and build the worker images on it.
+
+        Long-running (a cold build is ~20 minutes), so this returns
+        immediately and progress is polled from /api/cloud/provision.
+        """
+        from pixiecad.cloud_options import GPU_OPTIONS
+
+        option = next((o for o in GPU_OPTIONS if o.key == req.gpu), None)
+        if option is None:
+            raise HTTPException(status_code=400, detail=f"unknown gpu: {req.gpu}")
+        if not option.available:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{option.label} is not available on this project ({option.note})",
+            )
+
+        with lock:
+            if provisioning.get("status") == "running":
+                raise HTTPException(status_code=409, detail="a provision is already running")
+            provisioning.clear()
+            provisioning.update(
+                status="running", gpu=req.gpu, name=req.name, zone=req.zone, log=[]
+            )
+
+        def _run() -> None:
+            scripts = Path(__file__).resolve().parents[3] / "scripts"
+            steps = [
+                [str(scripts / "provision_gpu_vm.sh"), req.name, req.zone, req.gpu, "hunyuan"],
+                [str(scripts / "setup_hunyuan_vm.sh"), req.name, req.zone],
+            ]
+            if req.texture:
+                steps.append([str(scripts / "setup_hunyuan_texture.sh"), req.name, req.zone])
+            if req.semantic:
+                steps.append([str(scripts / "setup_sam_vm.sh"), req.name, req.zone])
+            try:
+                for step in steps:
+                    with lock:
+                        provisioning["log"].append(f"$ {Path(step[0]).name} {' '.join(step[1:])}")
+                    proc = subprocess.run(step, capture_output=True, text=True, timeout=3600)
+                    with lock:
+                        provisioning["log"].extend((proc.stdout or "").splitlines()[-15:])
+                    if proc.returncode != 0:
+                        with lock:
+                            provisioning["log"].extend((proc.stderr or "").splitlines()[-15:])
+                            provisioning["status"] = "failed"
+                        return
+                # The alias the executor needs; without config-ssh the host
+                # name does not resolve at all.
+                subprocess.run(["gcloud", "compute", "config-ssh", "--quiet"], timeout=300)
+                project = os.environ.get("PIXIECAD_GCP_PROJECT", "")
+                with lock:
+                    provisioning["status"] = "ready"
+                    provisioning["host"] = f"{req.name}.{req.zone}.{project}".rstrip(".")
+            except Exception as exc:
+                with lock:
+                    provisioning["status"] = "failed"
+                    provisioning["log"].append(str(exc))
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"status": "running"}
+
+    @app.get("/api/cloud/provision")
+    def provision_status():
+        with lock:
+            return dict(provisioning)
+
+    @app.post("/api/cloud/teardown")
+    def teardown(req: TeardownRequest):
+        """Delete the VM. Billing continues until this succeeds."""
+        proc = subprocess.run(
+            ["gcloud", "compute", "instances", "delete", req.name,
+             f"--zone={req.zone}", "--quiet"],
+            capture_output=True, text=True, timeout=600,
+        )
+        with lock:
+            provisioning.clear()
+        return {"ok": proc.returncode == 0, "output": (proc.stdout or proc.stderr)[-800:]}
 
     @app.get("/api/cloud")
     def get_cloud():

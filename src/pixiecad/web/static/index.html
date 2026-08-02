@@ -365,6 +365,17 @@
             </div>
 
             <div class="form-group">
+              <label for="gpu-type">Cloud GPU</label>
+              <select id="gpu-type" class="form-control"></select>
+              <div id="gpu-estimate" style="opacity:0.8;font-size:0.85em;margin-top:0.35rem;"></div>
+              <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
+                <button type="button" class="btn" id="provision-btn" style="flex:1;">Create GPU VM</button>
+                <button type="button" class="btn" id="teardown-btn" style="flex:1;background:#7a2c2c;">Delete VM</button>
+              </div>
+              <div id="provision-status" style="opacity:0.8;font-size:0.85em;margin-top:0.35rem;"></div>
+            </div>
+
+            <div class="form-group">
               <label for="gpu-host">GPU host (optional)</label>
               <input type="text" id="gpu-host" name="gpu_host" class="form-control"
                      placeholder="name.zone.project, e.g. pixiecad-tex.asia-southeast1-b.my-project">
@@ -528,6 +539,76 @@
         dropText.innerText = '📸 Drop photos here or click to browse';
       }
     }
+
+    // GPU hardware options: fetched so the estimates cannot drift from the
+    // numbers the backend actually uses.
+    let gpuOptions = [];
+    async function loadGpuOptions() {
+      try {
+        const res = await fetch('/api/gpu-options');
+        gpuOptions = (await res.json()).options || [];
+      } catch (e) { return; }
+      const sel = document.getElementById('gpu-type');
+      sel.innerHTML = '';
+      gpuOptions.forEach(o => {
+        const opt = document.createElement('option');
+        opt.value = o.key;
+        opt.textContent = o.label + (o.available ? '' : ' - unavailable');
+        opt.disabled = !o.available;
+        if (o.key === 'l4') opt.selected = true;
+        sel.appendChild(opt);
+      });
+      renderEstimate();
+    }
+    function renderEstimate() {
+      const key = document.getElementById('gpu-type').value;
+      const o = gpuOptions.find(x => x.key === key);
+      const box = document.getElementById('gpu-estimate');
+      if (!o) { box.textContent = ''; return; }
+      const m = s => Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+      box.innerHTML =
+        '<div>Warm VM: <b>' + m(o.warm.total_seconds) + '</b> &middot; $' +
+        o.warm.usd_spot.toFixed(3) + ' spot / $' + o.warm.usd_ondemand.toFixed(2) + ' on-demand</div>' +
+        '<div>First run on a new VM: ' + m(o.cold.total_seconds) +
+        ' &middot; $' + o.cold.usd_spot.toFixed(2) + ' spot (image build + weights)</div>' +
+        '<div style="opacity:0.75;margin-top:0.2rem;">' + o.speed_basis + '. ' + o.note + '</div>';
+    }
+    document.getElementById('gpu-type').addEventListener('change', renderEstimate);
+
+    document.getElementById('provision-btn').addEventListener('click', async () => {
+      const gpu = document.getElementById('gpu-type').value;
+      const status = document.getElementById('provision-status');
+      status.textContent = 'Starting...';
+      const res = await fetch('/api/cloud/provision', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ gpu })
+      });
+      if (!res.ok) { status.textContent = 'Error: ' + (await res.json()).detail; return; }
+      const poll = setInterval(async () => {
+        const st = await (await fetch('/api/cloud/provision')).json();
+        status.textContent = 'Provisioning: ' + (st.status || '') + ' - ' +
+          ((st.log || []).slice(-1)[0] || '');
+        if (st.status === 'ready') {
+          clearInterval(poll);
+          document.getElementById('gpu-host').value = st.host || '';
+          status.textContent = 'Ready: ' + st.host + ' (remember to delete it when done)';
+        } else if (st.status === 'failed') {
+          clearInterval(poll);
+          status.textContent = 'Provisioning failed - see server log';
+        }
+      }, 5000);
+    });
+
+    document.getElementById('teardown-btn').addEventListener('click', async () => {
+      const status = document.getElementById('provision-status');
+      status.textContent = 'Deleting...';
+      const res = await fetch('/api/cloud/teardown', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({})
+      });
+      status.textContent = (await res.json()).ok ? 'VM deleted. Billing stopped.' : 'Delete failed.';
+    });
+
+    loadGpuOptions();
 
     // Form Submit
     document.getElementById('upload-form').addEventListener('submit', async (e) => {

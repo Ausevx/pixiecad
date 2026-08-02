@@ -303,3 +303,44 @@ class TestFinishingOptionsWiring:
         from pixiecad.web.finishing import FinishOptions
 
         assert not FinishOptions().needs_gpu
+
+
+class TestGPUOptions:
+    def test_lists_hardware_with_costs(self, client):
+        data = client.get("/api/gpu-options").json()["options"]
+        keys = {o["key"] for o in data}
+        assert {"t4", "l4", "a100", "h100"} <= keys
+        for o in data:
+            assert o["warm"]["total_seconds"] > 0
+            assert o["warm"]["usd_spot"] > 0
+            assert o["cold"]["total_seconds"] > o["warm"]["total_seconds"]
+
+    def test_unavailable_hardware_is_flagged_not_hidden(self):
+        """Quota-zero options stay visible so the reason is legible."""
+        from pixiecad.cloud_options import GPU_OPTIONS
+
+        blocked = [o for o in GPU_OPTIONS if not o.available]
+        assert blocked
+        assert all(o.note for o in blocked)
+
+    def test_faster_hardware_costs_more_per_run_despite_being_quicker(self):
+        """The point the estimates exist to make."""
+        from pixiecad.cloud_options import GPU_OPTIONS, estimate
+
+        l4 = next(o for o in GPU_OPTIONS if o.key == "l4")
+        h100 = next(o for o in GPU_OPTIONS if o.key == "h100")
+        a = estimate(l4, texture=True, semantic=True, warm=True)
+        b = estimate(h100, texture=True, semantic=True, warm=True)
+        assert b["total_seconds"] < a["total_seconds"]
+        assert b["usd_spot"] > a["usd_spot"]
+
+    def test_provision_rejects_unavailable_hardware(self, client):
+        r = client.post("/api/cloud/provision", json={"gpu": "h100"})
+        assert r.status_code == 400
+        assert "not available" in r.json()["detail"]
+
+    def test_provision_rejects_unknown_hardware(self, client):
+        assert client.post("/api/cloud/provision", json={"gpu": "rtx4090"}).status_code == 400
+
+    def test_provision_status_starts_empty(self, client):
+        assert client.get("/api/cloud/provision").json() == {}
