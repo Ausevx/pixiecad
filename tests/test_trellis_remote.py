@@ -67,6 +67,9 @@ class FakeExecutor:
             if inp.is_dir():
                 for f in inp.iterdir():
                     saved_names.append(f.name)
+            else:
+                # Plain files are inputs too — the HF token is staged as one.
+                saved_names.append(inp.name)
         self.recorded_inputs.append(saved_names)
 
         if self.write_mesh and job.output_dir:
@@ -230,3 +233,76 @@ def test_generate_missing_output_file(tmp_path: Path) -> None:
         backend.generate(req, out_dir)
 
     assert "mesh.glb" in str(exc_info.value)
+
+
+def test_token_is_installed_from_a_file_never_a_command_line() -> None:
+    """The HF token must not reach `ps` output or `docker inspect`."""
+    script = build_trellis_script()
+
+    assert 'cp hf_token "$HOME/.cache/huggingface/token"' in script
+    assert "chmod 600" in script
+    # It is never exported into the container's environment or argv.
+    assert "-e HF_TOKEN" not in script
+    assert "HUGGING_FACE_HUB_TOKEN" not in script
+
+
+def test_script_aborts_on_worker_error_state() -> None:
+    """A failed preload keeps the container up; waiting it out wastes the budget."""
+    script = build_trellis_script()
+    assert '"status"[ ]*:[ ]*"error"' in script
+    assert "failed to initialise" in script
+
+
+def test_generate_stages_token_when_env_is_set(tmp_path: Path, monkeypatch) -> None:
+    high_gpu = GPUInfo(name="NVIDIA L4", vram_mb=23034, compute_cap=8.9)
+    caps_ok = Capabilities(hostname="gpu-node", gpu=high_gpu, reachable=True)
+    executor = FakeExecutor(caps=caps_ok, write_mesh=True)
+
+    img = tmp_path / "photo.png"
+    img.write_bytes(b"img")
+
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_value")
+    RemoteTrellisBackend(executor).generate(
+        GenerateRequest(images=[img]), tmp_path / "out"
+    )
+    assert "hf_token" in executor.recorded_inputs[0]
+
+
+def test_generate_omits_token_when_env_is_unset(tmp_path: Path, monkeypatch) -> None:
+    high_gpu = GPUInfo(name="NVIDIA L4", vram_mb=23034, compute_cap=8.9)
+    caps_ok = Capabilities(hostname="gpu-node", gpu=high_gpu, reachable=True)
+    executor = FakeExecutor(caps=caps_ok, write_mesh=True)
+
+    img = tmp_path / "photo.png"
+    img.write_bytes(b"img")
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    RemoteTrellisBackend(executor).generate(
+        GenerateRequest(images=[img]), tmp_path / "out"
+    )
+    assert "hf_token" not in executor.recorded_inputs[0]
+
+
+def test_gated_repo_failure_explains_the_fix(tmp_path: Path) -> None:
+    """A 401 deep in a traceback must become an instruction, not a wall of text."""
+    high_gpu = GPUInfo(name="NVIDIA L4", vram_mb=23034, compute_cap=8.9)
+    caps_ok = Capabilities(hostname="gpu-node", gpu=high_gpu, reachable=True)
+    fail = JobResult(
+        returncode=1,
+        stdout_tail="",
+        stderr_tail="huggingface_hub.errors.GatedRepoError: 401 Client Error.",
+        duration_s=1.0,
+    )
+    executor = FakeExecutor(caps=caps_ok, run_result=fail)
+
+    img = tmp_path / "photo.png"
+    img.write_bytes(b"img")
+
+    with pytest.raises(GenerativeError) as exc:
+        RemoteTrellisBackend(executor).generate(
+            GenerateRequest(images=[img]), tmp_path / "out"
+        )
+    msg = str(exc.value)
+    assert "HF_TOKEN" in msg
+    assert "dinov3" in msg

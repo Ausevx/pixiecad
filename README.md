@@ -48,7 +48,7 @@ pixiecad/
 │   ├── export.py            final .glb writer (mesh + UV + normal map + provenance)
 │   └── web/                 FastAPI dashboard + static/index.html (three.js viewer)
 │
-└── tests/                  167 tests, ~2s, no network/GPU required
+└── tests/                  172 tests, ~2s, no network/GPU required
 ```
 
 ### The two paths through the pipeline
@@ -166,6 +166,21 @@ The script installs Docker + the NVIDIA container runtime and pre-pulls the
 image for the chosen workload; teardown is
 `gcloud compute instances delete <name> --zone=<zone>`.
 
+**TRELLIS.2 needs a HuggingFace token.** It depends on
+`facebook/dinov3-vitl16-pretrain-lvd1689m`, a gated repo, so before the first
+generative run: accept the licence at
+<https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m>, create a
+read token at <https://huggingface.co/settings/tokens>, then
+
+```bash
+export HF_TOKEN=hf_...
+```
+
+PixieCAD ships the token to the GPU host as a file inside the mounted cache,
+never on a command line, so it does not show up in `ps` or `docker inspect`.
+Without it the worker downloads 19 GB and loads for several minutes before
+failing with a 401.
+
 The TRELLIS worker is a service, not a batch job: PixieCAD starts it once,
 waits for `/ready` (the first boot downloads the model), then posts views to
 it over the host's own loopback — no public port is ever opened. The container
@@ -179,4 +194,4 @@ never lost work, because every stage is cached by content hash.
 PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
 ```
 
-167 tests, ~2 seconds, fully offline — no GPU, no network, no API keys.
+172 tests, ~2 seconds, fully offline — no GPU, no network, no API keys.

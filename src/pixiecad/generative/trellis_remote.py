@@ -15,6 +15,7 @@ on a fresh VM pays that, and later builds reuse a warm GPU.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import tempfile
 import time
@@ -135,6 +136,20 @@ def build_trellis_script(
     names = image_names or ["00.png"]
     url = f"http://127.0.0.1:{WORKER_PORT}"
 
+    # TRELLIS.2 pulls facebook/dinov3-vitl16-pretrain-lvd1689m, a GATED repo:
+    # without credentials the worker downloads 19 GB of other weights, spends
+    # minutes loading them, and only then dies with a 401. The token is
+    # installed as a file inside the already-mounted HF cache rather than
+    # passed as -e or on a command line, so it never appears in `ps` output or
+    # in `docker inspect` on a shared host.
+    install_token = (
+        "if [ -f hf_token ]; then\n"
+        '  mkdir -p "$HOME/.cache/huggingface"\n'
+        '  cp hf_token "$HOME/.cache/huggingface/token"\n'
+        '  chmod 600 "$HOME/.cache/huggingface/token"\n'
+        "fi\n"
+    )
+
     form = " ".join(
         f'-F "images=@{images_dirname}/{n}"' for n in names
     )
@@ -155,7 +170,7 @@ def build_trellis_script(
 
     return f"""set -e
 mkdir -p out {REMOTE_OUTPUTS_DIR}
-if [ -z "$(docker ps -q -f name=^{CONTAINER_NAME}$ -f status=running)" ]; then
+{install_token}if [ -z "$(docker ps -q -f name=^{CONTAINER_NAME}$ -f status=running)" ]; then
   docker rm -f {CONTAINER_NAME} >/dev/null 2>&1 || true
   {docker_run_command(image)}
 fi
@@ -167,8 +182,16 @@ while :; do
   # up here as a non-running container with exit code 137.
   if [ -z "$(docker ps -q -f name=^{CONTAINER_NAME}$ -f status=running)" ]; then
     echo "TRELLIS worker exited during startup (code $(docker inspect -f '{{{{.State.ExitCode}}}}' {CONTAINER_NAME} 2>/dev/null))" >&2
-    echo "exit 137 means the host kernel OOM-killed it: the model needs ~15 GB of RAM, so use a VM with 32 GB (g2-standard-8), not 16 GB (g2-standard-4)." >&2
+    echo "exit 137 means the host kernel OOM-killed it: loading the model peaked past 36 GB in testing, so use a 64 GB VM (g2-standard-16 or larger)." >&2
     docker logs --tail 40 {CONTAINER_NAME} >&2 || true
+    exit 1
+  fi
+  # A failed preload leaves the container up but permanently unusable, so the
+  # error state has to end the wait too — otherwise we sit here for the full
+  # timeout while the worker cheerfully answers /ready with 200.
+  if curl -sf --max-time 10 {url}/ready | grep -q '"status"[ ]*:[ ]*"error"'; then
+    echo "TRELLIS worker failed to initialise:" >&2
+    curl -sf --max-time 10 {url}/ready >&2 || true
     exit 1
   fi
   tries=$((tries+1))
@@ -292,6 +315,19 @@ class RemoteTrellisBackend:
                 shutil.copyfile(img_path, target)
                 image_names.append(target.name)
 
+            # Staged as a file in the job's input dir so it travels over the
+            # same rsync as the images and never touches a command line.
+            hf_token = os.environ.get("HF_TOKEN") or os.environ.get(
+                "HUGGING_FACE_HUB_TOKEN"
+            )
+            if hf_token:
+                token_file = tmp_path / "hf_token"
+                token_file.write_text(hf_token.strip())
+                token_file.chmod(0o600)
+                job_inputs = [images_staging_dir, token_file]
+            else:
+                job_inputs = [images_staging_dir]
+
             script = build_trellis_script(
                 image=self.image,
                 image_names=image_names,
@@ -308,7 +344,7 @@ class RemoteTrellisBackend:
 
             job = Job(
                 command=["sh", "-c", script],
-                inputs=[images_staging_dir],
+                inputs=job_inputs,
                 output_dir=out_dir,
                 remote_subdir=remote_subdir,
                 timeout_s=self.timeout_s,
@@ -319,7 +355,18 @@ class RemoteTrellisBackend:
             elapsed = time.monotonic() - start_time
 
             if not result.ok:
-                stderr_tail = (result.stderr_tail or "")[-500:]
+                stderr_tail = (result.stderr_tail or "")[-1500:]
+                if "GatedRepoError" in stderr_tail or "gated repo" in stderr_tail:
+                    raise GenerativeError(
+                        "TRELLIS.2 needs a HuggingFace token: it depends on "
+                        "facebook/dinov3-vitl16-pretrain-lvd1689m, which is a gated "
+                        "repo. Accept the licence at "
+                        "https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m "
+                        "then create a read token at "
+                        "https://huggingface.co/settings/tokens and export HF_TOKEN "
+                        "before running. Without it the worker downloads 19 GB and "
+                        "loads for several minutes before failing with a 401."
+                    )
                 raise GenerativeError(
                     f"TRELLIS remote execution failed on host '{caps.hostname}': {stderr_tail}"
                 )
