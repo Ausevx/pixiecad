@@ -390,3 +390,23 @@ class TestCloudInventory:
             cloud._json = original
         assert resources[0].est_usd_per_month is None
         assert "disk still bills" in resources[0].advice
+
+
+class TestDashboardVersion:
+    def test_version_badge_present_and_semver(self):
+        """One source of truth: the data-version attribute in the header."""
+        import re
+
+        from pixiecad.web import app as app_module
+
+        html = (pathlib.Path(app_module.__file__).parent / "static" / "index.html").read_text()
+        m = re.search(r'id="app-version" data-version="(v\d+\.\d+\.\d+)"', html)
+        assert m, "dashboard version badge missing or malformed"
+
+    def test_stage_track_is_rendered_from_the_log(self):
+        """Derived from log markers, so it cannot drift from what ran."""
+        from pixiecad.web import app as app_module
+
+        html = (pathlib.Path(app_module.__file__).parent / "static" / "index.html").read_text()
+        assert 'id="stage-track"' in html
+        assert "renderStages(job)" in html

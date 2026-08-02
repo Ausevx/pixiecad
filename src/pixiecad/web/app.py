@@ -218,11 +218,37 @@ def create_app(root: Path) -> FastAPI:
             photos_dir = ws_root / "input"
             ws_dir = ws_root / "work" / "ws"
 
+            # The GPU host is what makes a real generative backend exist at
+            # all: run_build registers hunyuan-remote only when it is handed
+            # an executor. Without this the pipeline fell back to
+            # photogrammetry, which needs COLMAP locally, and every job died
+            # straight after ingest with the photos perfectly fine.
+            executor = None
+            if finish and finish.gpu_host:
+                from pixiecad.executors import SSHExecutor
+
+                executor = SSHExecutor(finish.gpu_host)
+                with lock:
+                    current = jobs.get(job_id)
+                    if current:
+                        current["log"].append(
+                            f"Using GPU host {finish.gpu_host} for generation."
+                        )
+            else:
+                with lock:
+                    current = jobs.get(job_id)
+                    if current:
+                        current["log"].append(
+                            "No GPU host set: generation will need local COLMAP "
+                            "and 16+ orbit photos. Set a GPU host to generate."
+                        )
+
             result = _call_build(
                 photos_dir=photos_dir,
                 workspace=ws_dir,
                 dense=False,
                 bake=False,
+                executor=executor,
                 generative_backend=backend,
                 split=split,
                 object_hint=object_hint,

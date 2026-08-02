@@ -282,8 +282,12 @@
   </script>
 </head>
 <body>
-  <header>
+  <header style="position:relative;">
     <h1><span>✨</span> PixieCAD Local Dashboard</h1>
+    <span id="app-version" data-version="v0.1.0"
+          style="position:absolute;top:0.75rem;right:1rem;font-size:0.7rem;
+                 letter-spacing:0.06em;opacity:0.35;font-variant-numeric:tabular-nums;
+                 user-select:none;"></span>
     <span class="badge badge-done" id="system-status">System Ready</span>
   </header>
 
@@ -453,6 +457,7 @@
     <div style="display: flex; flex-direction: column; gap: 1.5rem;">
       <div class="card">
         <h2 class="card-title">Pipeline Log Stream</h2>
+        <div id="stage-track" style="display:flex;flex-wrap:wrap;gap:0.3rem;margin-bottom:0.6rem;"></div>
         <div class="log-panel" id="log-panel">Select a job to view logs...</div>
       </div>
 
@@ -573,6 +578,57 @@
       } else {
         dropText.innerText = '📸 Drop photos here or click to browse';
       }
+    }
+
+    document.getElementById('app-version').textContent =
+      document.getElementById('app-version').dataset.version;
+
+    // Pipeline stages, in run order. Derived from the log rather than a new
+    // API field so it reflects exactly what the pipeline reported, including
+    // stages it chose to skip.
+    const STAGES = [
+      ['ingest', 'Ingest'], ['sparse', 'Sparse'], ['dense', 'Dense'],
+      ['scale', 'Scale'], ['clean', 'Clean'], ['decimate', 'Decimate'],
+      ['bake', 'Bake'], ['export', 'Export'],
+    ];
+    const FINISH_STEPS = [
+      [/Smoothed \d+ iteration/, 'Smooth'],
+      [/Texture applied/, 'Texture'],
+      [/Exported \d+ parts/, 'Parts'],
+      [/Web model:/, 'Web'],
+    ];
+    const STAGE_STYLE = {
+      ok:      'background:#14532d;color:#dcfce7;',
+      failed:  'background:#7f1d1d;color:#fee2e2;',
+      skipped: 'background:#1e293b;color:#64748b;',
+      running: 'background:#0c4a6e;color:#e0f2fe;',
+      pending: 'background:#1e293b;color:#475569;opacity:0.55;',
+    };
+
+    function renderStages(job) {
+      const track = document.getElementById('stage-track');
+      if (!job) { track.innerHTML = ''; return; }
+      const log = (job.log || []).join('\n');
+      const chips = [];
+      let seenRunning = false;
+
+      for (const [key, label] of STAGES) {
+        let state = 'pending';
+        if (new RegExp('\\[OK\\] ' + key + '\\b').test(log)) state = 'ok';
+        else if (new RegExp('\\[FAILED\\] ' + key + '\\b').test(log)) state = 'failed';
+        else if (new RegExp('\\[SKIPPED\\] ' + key + '\\b').test(log)) state = 'skipped';
+        else if (!seenRunning && job.status === 'running') { state = 'running'; seenRunning = true; }
+        chips.push([label, state]);
+      }
+      for (const [pattern, label] of FINISH_STEPS) {
+        chips.push([label, pattern.test(log) ? 'ok'
+          : (job.status === 'done' ? 'skipped' : 'pending')]);
+      }
+
+      track.innerHTML = chips.map(([label, state]) =>
+        '<span style="' + STAGE_STYLE[state] +
+        'padding:0.15rem 0.5rem;border-radius:999px;font-size:0.72rem;white-space:nowrap;">' +
+        label + '</span>').join('');
     }
 
     // GPU hardware options: fetched so the estimates cannot drift from the
@@ -786,6 +842,7 @@
         const res = await fetch(`/api/jobs/${jobId}`);
         if (!res.ok) return;
         const job = await res.json();
+        renderStages(job);
         const logPanel = document.getElementById('log-panel');
         // Follow the tail only when the user is already there. Unconditional
         // scrolling yanks the view away the moment they scroll up to read an
