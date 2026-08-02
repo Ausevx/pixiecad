@@ -16,6 +16,7 @@ Cloudflare tunnel and uploaded results to a stranger's S3 bucket.
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import time
@@ -33,29 +34,87 @@ HUNYUAN_MIN_VRAM_MB = 16000
 
 DEFAULT_HUNYUAN_IMAGE = "pixiecad-hunyuan:latest"
 DEFAULT_MODEL = "tencent/Hunyuan3D-2.1"
+# The multi-view checkpoint was only released for the 2.x line, so it is a
+# different repo and a different package (hy3dgen) from the single-view 2.1.
+MULTIVIEW_MODEL = "tencent/Hunyuan3D-2mv"
+MULTIVIEW_SUBFOLDER = "hunyuan3d-dit-v2-mv"
+
+# The only tags hy3dgen's preprocessor accepts; it sorts them into its own
+# order (front, +90 clockwise, back, +270), so tags matter and order does not.
+VIEW_TAGS = ("front", "left", "back", "right")
 
 # Options a caller may pass through to the remote script.
-PASSTHROUGH_OPTIONS = ("steps", "octree_resolution", "guidance_scale", "model")
+PASSTHROUGH_OPTIONS = (
+    "steps",
+    "octree_resolution",
+    "guidance_scale",
+    "model",
+    "subfolder",
+)
 
 _SCRIPT = Path(__file__).parent / "remote_scripts" / "hunyuan_gen.py"
+
+
+def map_views(paths: list[Path]) -> dict[str, Path]:
+    """Match photo filenames to the four view tags the model understands.
+
+    Only the four cardinal views are usable; obliques ("front_left") and a top
+    view have no tag and are dropped rather than mislabelled, because feeding a
+    3/4 shot in as "front" tells the model the car is shaped wrongly.
+    """
+    chosen: dict[str, Path] = {}
+    for path in paths:
+        stem = path.stem.lower()
+        has_front = "front" in stem
+        has_back = "rear" in stem or "back" in stem
+        has_left = "left" in stem
+        has_right = "right" in stem
+
+        # An oblique names two directions at once; ambiguity means skip.
+        if (has_front or has_back) and (has_left or has_right):
+            continue
+        if has_front:
+            tag = "front"
+        elif has_back:
+            tag = "back"
+        elif has_left:
+            tag = "left"
+        elif has_right:
+            tag = "right"
+        else:
+            continue
+        # First match wins so the result is stable for a sorted input list.
+        chosen.setdefault(tag, path)
+    return chosen
 
 
 def build_hunyuan_script(
     *,
     image: str = DEFAULT_HUNYUAN_IMAGE,
     image_name: str = "00.png",
+    views: dict[str, str] | None = None,
     seed: int | None = None,
     options: dict[str, Any] | None = None,
 ) -> str:
     """Return the shell script that produces ``out/mesh.glb`` on the GPU host."""
     opts = options or {}
+    if views:
+        source = [
+            "--views views.json",
+            f"--model {opts.get('model', MULTIVIEW_MODEL)}",
+            f"--subfolder {opts.get('subfolder', MULTIVIEW_SUBFOLDER)}",
+        ]
+    else:
+        source = [
+            f"--image images/{image_name}",
+            f"--model {opts.get('model', DEFAULT_MODEL)}",
+        ]
     flags = [
-        f"--image images/{image_name}",
+        *source,
         "--out out/mesh.glb",
         f"--steps {int(opts.get('steps', 30))}",
         f"--octree-resolution {int(opts.get('octree_resolution', 256))}",
         f"--guidance-scale {float(opts.get('guidance_scale', 5.0))}",
-        f"--model {opts.get('model', DEFAULT_MODEL)}",
     ]
     if seed is not None:
         flags.append(f"--seed {int(seed)}")
@@ -94,9 +153,11 @@ class RemoteHunyuanBackend:
         *,
         image: str = DEFAULT_HUNYUAN_IMAGE,
         timeout_s: int = 3600,
+        multiview: bool = True,
     ) -> None:
         self.executor = executor
         self.image = image
+        self.multiview = multiview
         self.timeout_s = timeout_s
 
     def available(self) -> bool:
@@ -126,31 +187,50 @@ class RemoteHunyuanBackend:
         images = [Path(p) for p in getattr(req, "images", [])]
         if not images:
             raise GenerativeError("Hunyuan3D needs at least one image")
-        # Single-image model: the first view is the conditioning view. Sending
-        # more would be silently ignored, so be explicit about what is used.
-        chosen = images[0]
         options = dict(getattr(req, "options", {}) or {})
         seed = getattr(req, "seed", None)
+
+        # Multi-view is worth it only with at least two usable cardinal views;
+        # with one, the dedicated single-view model is the better generator.
+        view_map = map_views(images) if self.multiview else {}
+        if len(view_map) < 2:
+            view_map = {}
+        chosen = images[0]
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             staged_images = tmp_path / "images"
             staged_images.mkdir()
-            target = staged_images / f"00{chosen.suffix or '.png'}"
-            shutil.copyfile(chosen, target)
             staged_script = tmp_path / "hunyuan_gen.py"
             shutil.copyfile(_SCRIPT, staged_script)
+            job_inputs = [staged_images, staged_script]
+
+            views_json: dict[str, str] = {}
+            if view_map:
+                for tag, src in sorted(view_map.items()):
+                    name = f"{tag}{src.suffix or '.png'}"
+                    shutil.copyfile(src, staged_images / name)
+                    views_json[tag] = name
+                views_file = tmp_path / "views.json"
+                views_file.write_text(json.dumps(views_json))
+                job_inputs.append(views_file)
+                target_name = ""
+            else:
+                target = staged_images / f"00{chosen.suffix or '.png'}"
+                shutil.copyfile(chosen, target)
+                target_name = target.name
 
             script = build_hunyuan_script(
                 image=self.image,
-                image_name=target.name,
+                image_name=target_name,
+                views=views_json or None,
                 seed=seed,
                 options={k: v for k, v in options.items() if k in PASSTHROUGH_OPTIONS},
             )
 
             job = Job(
                 command=["sh", "-c", script],
-                inputs=[staged_images, staged_script],
+                inputs=job_inputs,
                 output_dir=out_dir,
                 remote_subdir=f"hunyuan-{abs(hash((chosen.name, seed))) % 10**8:08d}",
                 timeout_s=self.timeout_s,
@@ -184,7 +264,15 @@ class RemoteHunyuanBackend:
             n_faces=n_faces,
             seconds=elapsed,
             cached=False,
-            metadata={"image": self.image, "conditioning_view": chosen.name},
+            metadata={
+                "image": self.image,
+                "mode": "multiview" if view_map else "single",
+                "conditioning_views": (
+                    sorted(f"{t}:{p.name}" for t, p in view_map.items())
+                    if view_map
+                    else [chosen.name]
+                ),
+            },
         )
 
 

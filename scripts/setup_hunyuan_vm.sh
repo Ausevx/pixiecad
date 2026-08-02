@@ -27,6 +27,16 @@ sudo chown -R $USER /opt/hunyuan
 if [ ! -d /opt/hunyuan/.git ]; then
   git clone --depth 1 __REPO__ /opt/hunyuan
 fi
+# The multi-view checkpoint only exists for the 2.x line and is loaded by
+# hy3dgen, a different package from 2.1's hy3dshape. Both repos ship so one
+# image can serve single-view (better geometry) and multi-view (uses your
+# actual photos) without a rebuild.
+sudo mkdir -p /opt/hunyuan2
+sudo chown -R $USER /opt/hunyuan2
+if [ ! -d /opt/hunyuan2/.git ]; then
+  git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.git /opt/hunyuan2
+fi
+cp -r /opt/hunyuan2 /opt/hunyuan/_hunyuan2_src
 cd /opt/hunyuan
 
 cat > /opt/hunyuan/Dockerfile.pixiecad <<'DOCKEREOF'
@@ -59,7 +69,8 @@ RUN pip install --no-cache-dir \
       opencv-python-headless imageio scikit-image \
       onnxruntime rembg torchdiffeq timm tqdm psutil \
       pytorch-lightning
-ENV PYTHONPATH=/opt/hunyuan/hy3dshape:/opt/hunyuan
+RUN cp -r /opt/hunyuan/_hunyuan2_src /opt/hunyuan2
+ENV PYTHONPATH=/opt/hunyuan/hy3dshape:/opt/hunyuan:/opt/hunyuan2
 DOCKEREOF
 
 sudo docker build -f /opt/hunyuan/Dockerfile.pixiecad -t pixiecad-hunyuan:latest /opt/hunyuan
@@ -73,6 +84,9 @@ print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.
 sys.path.insert(0, '/opt/hunyuan/hy3dshape')
 from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
 print('hy3dshape import OK')
+sys.path.insert(0, '/opt/hunyuan2')
+from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline as MV
+print('hy3dgen (multi-view) import OK')
 "
 echo BUILD_OK
 REMOTE

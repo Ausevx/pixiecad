@@ -342,3 +342,48 @@ def test_gated_dependency_is_avoided_by_default() -> None:
     """DINOv3 is gated:manual — a build must not wait on Meta approving a form."""
     assert "-e TRELLIS2_AVOID_GATED_DEPS=1" in build_trellis_script()
     assert "TRELLIS2_AVOID_GATED_DEPS" not in build_trellis_script(avoid_gated=False)
+
+
+def test_map_views_picks_cardinals_and_drops_obliques() -> None:
+    """Obliques must be dropped, not mislabelled.
+
+    Feeding a 3/4 shot in as "front" tells the model the object is shaped
+    wrongly, which is worse than simply using fewer views.
+    """
+    from pixiecad.generative.hunyuan_remote import map_views
+
+    names = [
+        "view_01_front.png", "view_02_front_left.png", "view_03_left.png",
+        "view_04_rear_left.png", "view_05_rear.png", "view_06_rear_right.png",
+        "view_07_right.png", "view_08_top.png",
+    ]
+    got = map_views([Path(n) for n in names])
+    assert {k: v.name for k, v in got.items()} == {
+        "front": "view_01_front.png",
+        "left": "view_03_left.png",
+        "back": "view_05_rear.png",
+        "right": "view_07_right.png",
+    }
+
+
+def test_map_views_accepts_back_as_synonym_for_rear() -> None:
+    from pixiecad.generative.hunyuan_remote import map_views
+
+    got = map_views([Path("back.jpg"), Path("front.jpg")])
+    assert set(got) == {"back", "front"}
+
+
+def test_multiview_needs_two_views_to_be_worth_it(tmp_path: Path) -> None:
+    """One usable view means the dedicated single-view model is the better tool."""
+    from pixiecad.generative.hunyuan_remote import RemoteHunyuanBackend
+
+    gpu = GPUInfo(name="NVIDIA L4", vram_mb=23034, compute_cap=8.9)
+    ex = FakeExecutor(
+        caps=Capabilities(hostname="gpu", gpu=gpu, reachable=True), write_mesh=True
+    )
+    only_front = tmp_path / "front.png"
+    only_front.write_bytes(b"x")
+    res = RemoteHunyuanBackend(ex).generate(
+        GenerateRequest(images=[only_front]), tmp_path / "out"
+    )
+    assert res.metadata["mode"] == "single"
