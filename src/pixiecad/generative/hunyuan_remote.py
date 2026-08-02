@@ -153,11 +153,17 @@ class RemoteHunyuanBackend:
         *,
         image: str = DEFAULT_HUNYUAN_IMAGE,
         timeout_s: int = 3600,
-        multiview: bool = True,
+        multiview: bool = False,
     ) -> None:
         self.executor = executor
         self.image = image
-        self.multiview = multiview
+        # Env override lets `pixiecad run --multiview` reach the backend
+        # without threading the flag through every call site.
+        import os
+
+        self.multiview = multiview or os.environ.get(
+            "PIXIECAD_HUNYUAN_MULTIVIEW"
+        ) == "1"
         self.timeout_s = timeout_s
 
     def available(self) -> bool:
@@ -190,8 +196,13 @@ class RemoteHunyuanBackend:
         options = dict(getattr(req, "options", {}) or {})
         seed = getattr(req, "seed", None)
 
-        # Multi-view is worth it only with at least two usable cardinal views;
-        # with one, the dedicated single-view model is the better generator.
+        # Off by default on the evidence, not on principle. Measured on the F1
+        # set: 2mv given all four cardinal views merged the front wheels into a
+        # slab and produced 18 components, while single-view 2.1 kept four
+        # distinct wheels and 5 components. Swapping left/right in case the
+        # tag convention was inverted changed nothing, so it is the model, not
+        # the mapping: 2mv is built on the older 2.0 line and the extra views
+        # do not compensate for the weaker base architecture.
         view_map = map_views(images) if self.multiview else {}
         if len(view_map) < 2:
             view_map = {}

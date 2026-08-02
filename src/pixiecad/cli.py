@@ -233,6 +233,10 @@ def run(
     object_hint: str = typer.Option(None, "--object", help="What the object is, e.g. 'an F1 car'"),
     drawings: bool = typer.Option(False, "--drawings", help="Also write ortho SVG drawings"),
     fast: bool = typer.Option(False, "--fast", help="Fast generative profile (minutes, not tens of minutes)"),
+    multiview: bool = typer.Option(
+        False, "--multiview",
+        help="Condition on up to 4 cardinal views (older 2.0-line model; usually worse)",
+    ),
 ):
     """Headless end-to-end run: photos in, .glb (+ parts) out, in a fresh session folder.
 
@@ -257,6 +261,10 @@ def run(
     ws = Workspace.create(session.work_dir / "ws", spec)
 
     executor = SSHExecutor(host) if host else None
+    if multiview:
+        import os
+
+        os.environ["PIXIECAD_HUNYUAN_MULTIVIEW"] = "1"
     # The HD default (1024_cascade) exceeded 27 minutes on an L4 and timed out.
     # game_ready at 512 is the profile that actually finishes on this hardware.
     gen_options = (

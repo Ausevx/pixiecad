@@ -127,7 +127,8 @@ def _run_generative(
         )
 
     t0 = time.monotonic()
-    images = [Path(p.working_path) for p in report.photos if p.working_path][:4]
+    all_images = [Path(p.working_path) for p in report.photos if p.working_path]
+    images = _select_conditioning_views(all_images)
     try:
         result = run_generate(
             GenerateRequest(images=images, options=generative_options or {}),
@@ -185,6 +186,29 @@ def _run_generative(
         max_parts=max_parts,
         object_hint=object_hint,
     )
+
+
+def _select_conditioning_views(images: list[Path], limit: int = 4) -> list[Path]:
+    """Pick which photos a generative backend gets, best-first.
+
+    Backends cap conditioning images (four, typically), so this decides which
+    four. Naive truncation took them in filename order, which for a normal
+    8-view capture meant front, front-left, left, rear-left -- two obliques
+    that multi-view models discard, silently halving the real coverage and
+    leaving the entire back and right of the object unseen.
+
+    Cardinal views go first because they are the ones a multi-view model can
+    actually key on; anything left over fills the remaining slots so
+    single-view backends still receive a sensible primary image.
+    """
+    from .generative.hunyuan_remote import map_views
+
+    cardinals = map_views(images)
+    ordered = [cardinals[t] for t in ("front", "left", "back", "right") if t in cardinals]
+    for img in images:
+        if img not in ordered:
+            ordered.append(img)
+    return ordered[:limit]
 
 
 def _fill_skipped_stages(stages: list[StageOutcome], remaining_stage_names: list[str]) -> None:

@@ -416,3 +416,39 @@ def test_parts_failure_containment(tmp_path, monkeypatch):
     assert parts_stage.status == "failed"
     assert "Splitting failed catastrophically" in parts_stage.detail
 
+
+
+def test_conditioning_views_prefer_cardinals_over_filename_order():
+    """Naive truncation silently halved real coverage.
+
+    A normal 8-view capture sorts as front, front-left, left, rear-left; taking
+    the first four hands a multi-view model two obliques it discards, so the
+    back and right of the object are never seen despite being photographed.
+    """
+    from pathlib import Path
+
+    from pixiecad.pipeline import _select_conditioning_views
+
+    shots = [
+        Path(n) for n in [
+            "view_01_front.png", "view_02_front_left.png", "view_03_left.png",
+            "view_04_rear_left.png", "view_05_rear.png", "view_06_rear_right.png",
+            "view_07_right.png", "view_08_top.png",
+        ]
+    ]
+    assert [p.name for p in _select_conditioning_views(shots)] == [
+        "view_01_front.png", "view_03_left.png",
+        "view_05_rear.png", "view_07_right.png",
+    ]
+
+
+def test_conditioning_views_fall_back_when_no_cardinals():
+    """Arbitrary filenames must still yield a usable primary image."""
+    from pathlib import Path
+
+    from pixiecad.pipeline import _select_conditioning_views
+
+    shots = [Path(f"IMG_{i}.jpg") for i in range(6)]
+    got = _select_conditioning_views(shots)
+    assert len(got) == 4
+    assert got[0].name == "IMG_0.jpg"
