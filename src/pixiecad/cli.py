@@ -240,6 +240,67 @@ def serve(
 
 
 @app.command()
+def parts(
+    mesh_file: Path = typer.Argument(..., exists=True, help="Mesh to split (.glb/.ply/.obj)"),
+    out_dir: Path = typer.Option("parts", "--out", "-o", help="Output directory"),
+    total_faces: int = typer.Option(20_000, "--total-faces", "-t", help="Budget across all parts"),
+    method: str = typer.Option("auto", help="auto | connected | cluster"),
+    max_parts: int = typer.Option(8, help="Maximum number of parts"),
+    object_hint: str = typer.Option(None, "--object", help="What the object is, e.g. 'an F1 car'"),
+    name: bool = typer.Option(True, help="Name parts with a vision model when one is configured"),
+):
+    """S5: split a mesh into separately budgeted, separately exported parts."""
+    import trimesh
+
+    from .parts import export_parts, split_parts
+
+    mesh = trimesh.load(mesh_file, force="mesh", process=False)
+    found = split_parts(mesh, method=method, max_parts=max_parts)
+    typer.echo(f"{len(found)} part(s) via {found[0].method}")
+
+    if name:
+        from .vision import name_parts
+
+        found = name_parts(found, mesh, object_hint=object_hint)
+        source = found[0].metadata.get("named_by", "geometry")
+        typer.echo(f"named by: {source}")
+
+    exported, manifest = export_parts(
+        found, out_dir, total_budget=total_faces, whole_volume=mesh.volume
+    )
+    for e in exported:
+        typer.echo(f"  {e.name:<24} {e.faces:>6} faces  {e.file}")
+    typer.echo(f"manifest: {manifest}")
+
+
+@app.command()
+def triage(
+    photos: Path = typer.Argument(..., exists=True, file_okay=False, help="Photo directory"),
+    provider: str = typer.Option(None, help="anthropic | gemini (default: first configured)"),
+):
+    """S0.5: check photos before reconstructing — coverage, viewpoints, problems."""
+    from .vision import triage_photos
+
+    images = sorted(
+        p for p in photos.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    )
+    if not images:
+        typer.echo(f"no images in {photos}", err=True)
+        raise typer.Exit(1)
+
+    report = triage_photos(images, provider=provider)
+    typer.echo(report.summary())
+    typer.echo(f"visual distinctness: {report.distinctness:.3f}")
+    for note in report.photos:
+        flags = ("  ⚠ " + "; ".join(note.issues)) if note.issues else ""
+        typer.echo(f"  {note.image:<28} {note.viewpoint}{flags}")
+    if report.missing:
+        typer.echo(f"missing viewpoints: {', '.join(report.missing)}")
+    for a in report.advice:
+        typer.echo(f"→ {a}")
+
+
+@app.command()
 def backends():
     """List generative backends and whether each is usable right now."""
     from .generative import available_backends
