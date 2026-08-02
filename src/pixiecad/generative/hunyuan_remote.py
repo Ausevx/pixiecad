@@ -156,10 +156,14 @@ def build_texture_script(
         '-v "$HOME/.cache/huggingface":/root/.cache/huggingface '
         '-v "$HOME/.cache/hy3dgen":/root/.cache/hy3dgen '
         '-v "$HOME/.u2net":/root/.u2net '
-        "-w /work "
+        # Run from the repo root, not /work and not the paint directory: the
+        # pipeline resolves its configs as "hy3dpaint/cfgs/...", relative to
+        # CWD. Every path we pass in is absolute so this cannot affect the
+        # job's own inputs or outputs.
+        "-w /opt/hunyuan "
         f"{image} python /work/hunyuan_texture.py "
         f"--mesh /work/{mesh_name} --image /work/images/{image_name} "
-        f"--out out/textured.glb --max-views {int(max_views)} "
+        f"--out /work/out/textured.glb --max-views {int(max_views)} "
         f"--resolution {int(resolution)}\n"
     )
 

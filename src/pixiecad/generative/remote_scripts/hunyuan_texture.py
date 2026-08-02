@@ -36,6 +36,13 @@ def main() -> int:
     from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
 
     conf = Hunyuan3DPaintConfig(args.max_views, args.resolution)
+    # Upstream stores this as "ckpt/RealESRGAN_x4plus.pth", resolved against
+    # the process CWD. Anything but the repo root then fails deep inside model
+    # loading with a bare FileNotFoundError, so pin it to where the image
+    # actually put the file.
+    ckpt = Path("/opt/hunyuan/hy3dpaint/ckpt/RealESRGAN_x4plus.pth")
+    if ckpt.is_file():
+        conf.realesrgan_ckpt_path = str(ckpt)
     pipeline = Hunyuan3DPaintPipeline(conf)
 
     out = Path(args.out)
@@ -63,9 +70,20 @@ def main() -> int:
         meta["inspect_error"] = str(exc)
 
     (out.parent / "texture_meta.json").write_text(json.dumps(meta))
-    print(f"wrote {out} {meta}")
+    print(f"wrote {out} {meta}", flush=True)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    code = main()
+    # os._exit, not SystemExit: bpy is a full Blender build and its teardown
+    # at interpreter shutdown returns non-zero even after a clean run. The
+    # executor judges success by exit code, so a finished job with every
+    # output written was being reported as a failure. Everything is flushed
+    # above, so skipping cleanup costs nothing.
+    import os
+    import sys
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)

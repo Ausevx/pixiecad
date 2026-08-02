@@ -48,7 +48,7 @@ def inputs(tmp_path: Path):
 class TestBuildTextureScript:
     def test_writes_into_the_collected_directory(self):
         """SSHExecutor only rsyncs 'out/' back."""
-        assert "--out out/textured.glb" in build_texture_script()
+        assert "--out /work/out/textured.glb" in build_texture_script()
 
     def test_mounts_weight_caches(self):
         script = build_texture_script()
