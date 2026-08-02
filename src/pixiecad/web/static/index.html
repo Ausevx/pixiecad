@@ -319,6 +319,17 @@
               <input type="text" id="object-hint" name="object_hint" class="form-control" placeholder="e.g. chair, mug, engine part">
             </div>
 
+            <div class="form-group">
+              <label for="octree">Generation detail</label>
+              <select id="octree" name="octree_resolution" class="form-control">
+                <option value="192">Draft - fastest</option>
+                <option value="256" selected>Standard</option>
+                <option value="384">High - separates close parts better</option>
+                <option value="512">Maximum - slowest, most VRAM</option>
+              </select>
+              <small style="opacity:0.7;">Independent of the polygon budget. Raise this when parts of the object merge together; the budget only controls simplification afterwards.</small>
+            </div>
+
             <hr style="border:none;border-top:1px solid rgba(255,255,255,0.12);margin:1rem 0 0.75rem;">
             <div style="font-weight:600;margin-bottom:0.5rem;">Finishing</div>
 

@@ -156,6 +156,7 @@ def create_app(root: Path) -> FastAPI:
         split: bool = True,
         object_hint: str | None = None,
         finish: FinishOptions | None = None,
+        generative_options: dict[str, Any] | None = None,
     ) -> None:
         with lock:
             job = jobs.get(job_id)
@@ -177,6 +178,7 @@ def create_app(root: Path) -> FastAPI:
                 generative_backend=backend,
                 split=split,
                 object_hint=object_hint,
+                generative_options=generative_options,
             )
 
             regime_val = (
@@ -332,6 +334,7 @@ def create_app(root: Path) -> FastAPI:
         texture_size: int = Form(1024),
         max_parts: int = Form(8),
         gpu_host: str | None = Form(None),
+        octree_resolution: int = Form(256),
     ):
         # One session folder per upload: input/, work/ and output/ are never
         # shared between jobs, so two people uploading at once cannot read or
@@ -370,6 +373,13 @@ def create_app(root: Path) -> FastAPI:
             gpu_host=(gpu_host.strip() or None) if gpu_host else None,
         )
 
+        # Geometric detail of the generative decode. This is the lever that
+        # actually separates parts that sit close together -- raising it makes
+        # the model resolve a gap the decoder would otherwise bridge -- and it
+        # is independent of the polygon budget, which only controls how the
+        # result is simplified afterwards.
+        gen_options = {"octree_resolution": max(64, octree_resolution)}
+
         session.write_meta(job_id=job_id, name=spec.name, target_faces=target_faces)
 
         job_info: dict[str, Any] = {
@@ -407,7 +417,8 @@ def create_app(root: Path) -> FastAPI:
 
         thread = threading.Thread(
             target=_job_worker,
-            args=(job_id, job_dir, target_faces, backend_val, split, hint_val, finish),
+            args=(job_id, job_dir, target_faces, backend_val, split, hint_val, finish,
+                  gen_options),
             daemon=True,
         )
         thread.start()
