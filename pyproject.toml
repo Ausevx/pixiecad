@@ -1,0 +1,28 @@
+[project]
+name = "pixiecad"
+version = "0.1.0"
+description = "Photos in, spec-accurate budgeted-polygon 3D models out."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "opencv-python-headless>=4.9",
+    "pydantic>=2.6",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+bgremoval = ["rembg>=2.0"]
+sfm = ["pycolmap>=3.10"]
+mesh = ["trimesh>=4.0", "pyfqmr>=0.2", "xatlas>=0.0.9"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+pixiecad = "pixiecad.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pixiecad"]
