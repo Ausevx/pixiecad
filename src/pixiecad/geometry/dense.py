@@ -25,27 +25,46 @@ class DenseResult:
     cached: bool = False
 
 
+# Distro COLMAP packages are built WITHOUT CUDA (CUDA isn't redistributable in
+# Debian main), so patch_match_stereo — the only reason we want a GPU — is
+# missing from them. The official image is the reliable CUDA-enabled path.
+DOCKER_COLMAP_IMAGE = "colmap/colmap:latest"
+
+
+def docker_prefix(image: str = DOCKER_COLMAP_IMAGE, workdir: str = "/work") -> str:
+    """Command prefix that runs COLMAP inside the CUDA-enabled official image."""
+    return (
+        f"docker run --rm --gpus all -v \"$PWD\":{workdir} -w {workdir} {image}"
+    )
+
+
 def build_dense_script(
     job_dir: str = ".",
     *,
     images_dirname: str = "images",
     model_dirname: str = "sparse",
+    colmap_cmd: str = "colmap",
 ) -> str:
     """Return a single POSIX shell script string running dense COLMAP commands.
 
     Inputs land in the remote job dir under their local basenames (rsync
     semantics of SSHExecutor), so the dir names are parameters, not constants.
+
+    ``colmap_cmd`` is how COLMAP is invoked on the target: ``"colmap"`` for a
+    native CUDA build, or ``f"{docker_prefix()} colmap"`` to run the official
+    image. ``mkdir`` stays outside it so the dir is owned by the login user,
+    not by root inside the container.
     """
     cmds = []
     if job_dir and job_dir != ".":
         cmds.append(f"cd {job_dir}")
     cmds.extend([
-        f"colmap image_undistorter --image_path {images_dirname} "
-        f"--input_path {model_dirname} --output_path dense",
-        "colmap patch_match_stereo --workspace_path dense",
-        "colmap stereo_fusion --workspace_path dense --output_path dense/fused.ply",
         "mkdir -p out",
-        "colmap poisson_mesher --input_path dense/fused.ply --output_path out/mesh.ply",
+        f"{colmap_cmd} image_undistorter --image_path {images_dirname} "
+        f"--input_path {model_dirname} --output_path dense",
+        f"{colmap_cmd} patch_match_stereo --workspace_path dense",
+        f"{colmap_cmd} stereo_fusion --workspace_path dense --output_path dense/fused.ply",
+        f"{colmap_cmd} poisson_mesher --input_path dense/fused.ply --output_path out/mesh.ply",
     ])
     return " && ".join(cmds)
 
@@ -57,6 +76,7 @@ def run_dense(
     executor: Executor,
     *,
     timeout_s: int = 7200,
+    use_docker: bool = True,
 ) -> DenseResult:
     images_dir = Path(images_dir)
     sparse_model_dir = Path(sparse_model_dir)
@@ -69,7 +89,7 @@ def run_dense(
         )
     fingerprints = [fingerprint_file(p) for p in sparse_files]
 
-    run = workspace.begin_stage("s2-dense", {}, fingerprints)
+    run = workspace.begin_stage("s2-dense", {"docker": use_docker}, fingerprints)
 
     result_path = run.dir / "result.json"
     if run.cached:
@@ -92,6 +112,7 @@ def run_dense(
             build_dense_script(
                 images_dirname=images_dir.name,
                 model_dirname=sparse_model_dir.name,
+                colmap_cmd=f"{docker_prefix()} colmap" if use_docker else "colmap",
             ),
         ],
         inputs=[images_dir, sparse_model_dir],

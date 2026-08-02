@@ -11,6 +11,7 @@ from pixiecad.geometry import (
     DenseResult,
     DenseUnavailable,
     build_dense_script,
+    docker_prefix,
     run_dense,
 )
 from pixiecad.spec import ObjectSpec
@@ -86,13 +87,25 @@ def test_build_dense_script():
     assert "mkdir -p out" in script
     assert "colmap poisson_mesher --input_path dense/fused.ply --output_path out/mesh.ply" in script
 
-    # Check order of commands
+    # COLMAP stages run in dependency order; `mkdir -p out` comes first so the
+    # output dir belongs to the login user rather than root-in-container.
+    idx_mkdir = script.index("mkdir -p out")
     idx1 = script.index("colmap image_undistorter")
     idx2 = script.index("colmap patch_match_stereo")
     idx3 = script.index("colmap stereo_fusion")
-    idx4 = script.index("mkdir -p out")
     idx5 = script.index("colmap poisson_mesher")
-    assert idx1 < idx2 < idx3 < idx4 < idx5
+    assert idx_mkdir < idx1 < idx2 < idx3 < idx5
+
+
+def test_build_dense_script_docker():
+    """Docker mode wraps every COLMAP call but leaves mkdir on the host."""
+    script = build_dense_script(colmap_cmd=f"{docker_prefix()} colmap")
+
+    assert script.count("docker run --rm --gpus all") == 4  # one per colmap stage
+    assert "colmap/colmap" in script
+    # mkdir must NOT be containerised
+    mkdir_segment = next(s for s in script.split(" && ") if "mkdir" in s)
+    assert "docker" not in mkdir_segment
 
 
 def test_no_gpu_probe(workspace, sample_sparse_inputs):
@@ -158,7 +171,11 @@ def test_happy_path_and_cache(workspace, sample_sparse_inputs):
     assert executor.run_call_count == 1
 
     recorded_job = executor.recorded_jobs[0]
-    assert recorded_job.command == ["sh", "-c", build_dense_script()]
+    # run_dense defaults to docker (distro COLMAP has no CUDA)
+    assert recorded_job.command[:2] == ["sh", "-c"]
+    assert recorded_job.command[2] == build_dense_script(
+        colmap_cmd=f"{docker_prefix()} colmap"
+    )
     assert recorded_job.inputs == [images_dir, sparse_model_dir]
 
     script = recorded_job.command[2]
