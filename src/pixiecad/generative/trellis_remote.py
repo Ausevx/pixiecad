@@ -98,14 +98,21 @@ def _get_generative_base() -> tuple[type[Any], type[Exception], type[Exception]]
         return _base_classes_cache
 
 
-def docker_run_command(image: str = DEFAULT_TRELLIS_IMAGE) -> str:
+def docker_run_command(
+    image: str = DEFAULT_TRELLIS_IMAGE, *, avoid_gated: bool = True
+) -> str:
     """Return the `docker run` line that starts the worker service detached.
 
     The port is bound to loopback only: the client is a shell on the same host,
     so exposing it on the VM's external interface would be pure attack surface.
     """
+    # The image's own escape hatch from the gated DINOv3 encoder: it swaps in
+    # DINOv2 (ungated) as the conditioning model. Default on, because
+    # facebook/dinov3-* is gated:"manual" -- a human at Meta approves each
+    # request, so without this a build is blocked on someone else's inbox.
+    gated_env = "-e TRELLIS2_AVOID_GATED_DEPS=1 " if avoid_gated else ""
     return (
-        f"docker run -d --name {CONTAINER_NAME} --gpus all "
+        f"docker run -d --name {CONTAINER_NAME} --gpus all {gated_env}"
         # Deliberately NOT --restart unless-stopped. Loading the model needs
         # ~15 GB of host RAM; on an undersized VM the kernel OOM-kills it, and
         # a restart policy turns that into a silent respawn loop that burns the
@@ -128,6 +135,7 @@ def build_trellis_script(
     ready_timeout_s: int = 1800,
     generate_timeout_s: int = 1800,
     options: dict[str, Any] | None = None,
+    avoid_gated: bool = True,
 ) -> str:
     """Return the POSIX shell script that produces ``out/mesh.glb`` on the host.
 
@@ -176,7 +184,7 @@ def build_trellis_script(
 mkdir -p out {REMOTE_OUTPUTS_DIR}
 {install_token}if [ -z "$(docker ps -q -f name=^{CONTAINER_NAME}$ -f status=running)" ]; then
   docker rm -f {CONTAINER_NAME} >/dev/null 2>&1 || true
-  {docker_run_command(image)}
+  {docker_run_command(image, avoid_gated=avoid_gated)}
 fi
 tries=0
 while :; do
@@ -382,7 +390,10 @@ class RemoteTrellisBackend:
                 stderr_tail = (result.stderr_tail or "")[-1500:]
                 if "GatedRepoError" in stderr_tail or "gated repo" in stderr_tail:
                     raise GenerativeError(
-                        "TRELLIS.2 needs a HuggingFace token: it depends on "
+                        "TRELLIS.2's default encoder is gated. Preferred fix: run "
+                        "with avoid_gated=True (the default), which swaps in the "
+                        "ungated DINOv2 encoder and needs no account at all. "
+                        "To use the gated DINOv3 instead you need a token: it depends on "
                         "facebook/dinov3-vitl16-pretrain-lvd1689m, which is a gated "
                         "repo. Accept the licence at "
                         "https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m "

@@ -278,6 +278,9 @@ def test_generate_omits_token_when_env_is_unset(tmp_path: Path, monkeypatch) -> 
 
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    # Point HF_HOME at an empty dir: otherwise this reads the developer's real
+    # stored login and passes or fails depending on whose machine it runs on.
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "empty-hf"))
     RemoteTrellisBackend(executor).generate(
         GenerateRequest(images=[img]), tmp_path / "out"
     )
@@ -333,3 +336,9 @@ def test_resolve_hf_token_ignores_blank_values(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setenv("HF_TOKEN", "   ")
     monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
     assert resolve_hf_token() is None
+
+
+def test_gated_dependency_is_avoided_by_default() -> None:
+    """DINOv3 is gated:manual — a build must not wait on Meta approving a form."""
+    assert "-e TRELLIS2_AVOID_GATED_DEPS=1" in build_trellis_script()
+    assert "TRELLIS2_AVOID_GATED_DEPS" not in build_trellis_script(avoid_gated=False)
