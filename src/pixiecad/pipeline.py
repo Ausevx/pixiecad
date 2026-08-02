@@ -98,6 +98,7 @@ def _run_generative(
     max_parts: int = 8,
     object_hint: str | None = None,
     executor: Executor | None = None,
+    generative_options: dict | None = None,
 ) -> BuildResult:
     """Regimes with too few photos to triangulate: invent the geometry instead.
 
@@ -123,7 +124,11 @@ def _run_generative(
     t0 = time.monotonic()
     images = [Path(p.working_path) for p in report.photos if p.working_path][:4]
     try:
-        result = run_generate(GenerateRequest(images=images), ws, backend=backend)
+        result = run_generate(
+            GenerateRequest(images=images, options=generative_options or {}),
+            ws,
+            backend=backend,
+        )
         mesh = trimesh.load(result.mesh_path, force="mesh", process=False)
         stages.append(
             StageOutcome(
@@ -183,6 +188,7 @@ def run_build(
     split: bool = False,
     max_parts: int = 8,
     object_hint: str | None = None,
+    generative_options: dict | None = None,
 ) -> BuildResult:
     """Run the end-to-end PixieCAD pipeline.
 
@@ -269,6 +275,7 @@ def run_build(
             max_parts=max_parts,
             object_hint=object_hint,
             executor=executor,
+            generative_options=generative_options,
         )
 
     # S2a Sparse

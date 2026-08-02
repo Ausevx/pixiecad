@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 import trimesh
+from trimesh import graph
 
 # Debris is judged by surface area, not face count: a coarse box can be huge
 # with 12 faces while a fine cylinder is tiny with 64, so face count says
@@ -31,6 +32,12 @@ import trimesh
 # meshops.clean_mesh.
 DEFAULT_MIN_AREA_FRAC = 0.01
 MIN_FACES_PER_PART = 4
+
+# Cap on how many connected components are turned into real meshes. Callers
+# only ever keep a handful (max_parts), and a generative mesh can contain
+# thousands of shells -- materialising them all is what ran the machine out of
+# memory. Comfortably above any sane max_parts, cheap at this size.
+MAX_MATERIALISED_COMPONENTS = 200
 
 
 @dataclass
@@ -84,8 +91,40 @@ class Part:
 
 
 def _components(mesh: trimesh.Trimesh) -> list[trimesh.Trimesh]:
-    parts = mesh.split(only_watertight=False)
-    return list(parts) if len(parts) else [mesh]
+    """Connected components, largest first, without exploding memory.
+
+    mesh.split() builds a Trimesh per component. A generative mesh is made of
+    hundreds of shells whose UV seams read as cracks, so split() produced tens
+    of thousands of objects here and was OOM-killed on a 16 GB machine. Faces
+    are grouped by label instead, and only the components big enough to matter
+    are ever materialised.
+    """
+    from ..meshops.cleanup import _positional_face_adjacency
+
+    n_faces = len(mesh.faces)
+    if not n_faces:
+        return [mesh]
+
+    labels = np.full(n_faces, -1, dtype=np.int64)
+    groups = graph.connected_components(
+        _positional_face_adjacency(mesh), nodes=np.arange(n_faces)
+    )
+    if not len(groups):
+        return [mesh]
+    for i, g in enumerate(groups):
+        labels[g] = i
+
+    areas = np.bincount(labels, weights=mesh.area_faces, minlength=len(groups))
+    # Biggest first: downstream keeps the top N, and a car's body must outrank
+    # its wing mirror regardless of which component the mesher emitted first.
+    order = np.argsort(areas)[::-1][:MAX_MATERIALISED_COMPONENTS]
+
+    out = []
+    for idx in order:
+        sub = mesh.submesh([np.flatnonzero(labels == idx)], append=True)
+        if len(sub.faces):
+            out.append(sub)
+    return out or [mesh]
 
 
 def _cluster_faces(mesh: trimesh.Trimesh, k: int, seed: int = 0) -> np.ndarray:

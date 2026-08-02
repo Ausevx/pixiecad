@@ -84,6 +84,26 @@ def decimate_to_budget(
                 best_v, best_f = v2, f2
                 best_count = count2
 
+    # Border preservation can make the budget physically unreachable. A
+    # generative mesh arrives as hundreds of open shells, and every shell's rim
+    # is a border: a real 126k-face car stalled at 110k against a 20k budget
+    # because almost no edge was collapsible. The budget is the product's
+    # contract, so when preserving borders cannot deliver it, stop preserving
+    # them -- a slightly looser silhouette beats missing the target by 5x.
+    if best_count > target_faces * 1.1:
+        s3 = pyfqmr.Simplify()
+        s3.setMesh(mesh.vertices, mesh.faces)
+        s3.simplify_mesh(
+            target_count=target_faces,
+            aggressiveness=aggressiveness,
+            preserve_border=False,
+            verbose=0,
+        )
+        v3, f3, _ = s3.getMesh()
+        if abs(len(f3) - target_faces) < abs(best_count - target_faces):
+            best_v, best_f = v3, f3
+            best_count = len(f3)
+
     result_mesh = trimesh.Trimesh(vertices=best_v, faces=best_f, process=False)
     result_info = DecimateResult(
         faces_before=faces_before,

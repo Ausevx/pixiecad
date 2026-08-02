@@ -176,6 +176,9 @@ def run_generate(
         "backend": resolved_name,
         "seed": req.seed,
         "texture": req.texture,
+        # Options change the mesh, so they must change the cache key: without
+        # this a fast-profile re-run would silently return the HD run's result.
+        "options": dict(sorted(req.options.items())),
     }
 
     run = workspace.begin_stage("s3-generate", params, fingerprints)
