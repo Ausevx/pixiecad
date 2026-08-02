@@ -12,3 +12,5 @@ demo_ws/
 .beads-credential-key
 .agy-worktrees/
 ws-*/
+AGENTS.md
+.claude/

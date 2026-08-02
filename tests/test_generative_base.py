@@ -98,10 +98,31 @@ def test_get_backend_missing_raises():
     assert "fake" in err_msg
 
 
-def test_get_backend_none_picks_available():
-    backend = get_backend(None)
-    assert backend is not None
-    assert backend.available()
+def test_get_backend_none_never_picks_fake():
+    """Auto-selection must skip the test double; 'fake' is explicit-only."""
+    with pytest.raises(BackendUnavailable, match="No generative backend is usable"):
+        get_backend(None)
+    # Explicitly named still works.
+    assert get_backend("fake").name == "fake"
+
+
+def test_get_backend_none_prefers_self_hosted(monkeypatch):
+    """With both a priority backend and another registered, priority wins."""
+    from pixiecad.generative import base as gb
+
+    class Dummy:
+        def __init__(self, name):
+            self.name = name
+
+        def available(self):
+            return True
+
+        def generate(self, req, out_dir):
+            raise NotImplementedError
+
+    monkeypatch.setitem(gb._REGISTRY, "trellis-remote", lambda: Dummy("trellis-remote"))
+    monkeypatch.setitem(gb._REGISTRY, "other", lambda: Dummy("other"))
+    assert get_backend(None).name == "trellis-remote"
 
 
 def test_fake_backend_generate(tmp_path: Path):

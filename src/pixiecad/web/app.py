@@ -108,6 +108,10 @@ def create_app(root: Path) -> FastAPI:
             if job:
                 job["status"] = "done"
                 job["stage"] = "complete"
+                # Record where we actually wrote it: the download endpoint
+                # serves glb_path, and re-optimising must repoint it rather
+                # than leave a stale path from an earlier build.
+                job["glb_path"] = str(glb_path)
                 job["glb_url"] = f"/api/jobs/{job_id}/model.glb"
                 job["log"].append("GLB model export complete.")
 

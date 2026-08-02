@@ -8,7 +8,7 @@ or **generate** a plausible model from a few photos, real or AI-made.
 
 ```
 pixiecad/
-├── CLAUDE.md              agent instructions: 16GB memory limit, no git remote
+├── CLAUDE.md              dev-machine constraints: 16GB memory limit, no git remote
 ├── PLAN.md                architecture notes / design log
 ├── pyproject.toml         deps, package config
 ├── scripts/

@@ -1,6 +1,6 @@
-# Project Instructions for AI Agents
+# Project Instructions
 
-This file provides instructions and context for AI coding agents working on this project.
+Ground rules for working in this repository.
 
 ## ⛔ Resource limits on this machine — NON-NEGOTIABLE
 
@@ -17,9 +17,6 @@ the OS and the user's own work.
 - Tests must stay light and fast. Anything slow or network-dependent is opt-in
   behind the `slow` / `network` pytest markers and is NEVER part of the default
   `pytest -q` run.
-- Worker agents dispatched via agy inherit these limits. Do not instruct a
-  worker to "actually run" an expensive pipeline to verify it.
-
 If in doubt about a task's footprint, measure it small first or ask.
 
 ## Git

@@ -63,6 +63,10 @@ class GenerativeBackend(Protocol):
 
 _REGISTRY: dict[str, Callable[[], GenerativeBackend]] = {}
 
+# Order tried when no backend is named: self-hosted GPU first (spends existing
+# cloud credits), then fal.ai (separate paid account, configurable backup).
+AUTO_PRIORITY = ["trellis-remote", "fal"]
+
 
 def register_backend(factory: Callable[[], GenerativeBackend], name: str) -> None:
     """Register a factory function for a generative backend under name."""
@@ -105,16 +109,24 @@ def get_backend(name: str | None = None) -> GenerativeBackend:
             )
         return backend
 
-    for name_key, factory in list(_REGISTRY.items()):
+    # Auto-selection order: our own GPU (GCP credits) before third-party paid
+    # APIs; "fake" is a test double and must never be picked implicitly.
+    ordered = [n for n in AUTO_PRIORITY if n in _REGISTRY] + [
+        n for n in _REGISTRY if n not in AUTO_PRIORITY and n != "fake"
+    ]
+    for name_key in ordered:
         try:
-            backend = factory()
+            backend = _REGISTRY[name_key]()
             if backend.available():
                 return backend
         except Exception:
             pass
 
     raise BackendUnavailable(
-        f"No available generative backend found. Registered backends: {registered_names}"
+        "No generative backend is usable. Options: provision a GPU host and pass "
+        "an executor (trellis-remote, uses your cloud credits), set FAL_KEY "
+        "(fal.ai, paid per model), or request 'fake' explicitly for tests. "
+        f"Registered backends: {registered_names}"
     )
 
 

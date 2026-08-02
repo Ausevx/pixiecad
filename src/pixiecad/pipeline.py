@@ -97,6 +97,7 @@ def _run_generative(
     split: bool = False,
     max_parts: int = 8,
     object_hint: str | None = None,
+    executor: Executor | None = None,
 ) -> BuildResult:
     """Regimes with too few photos to triangulate: invent the geometry instead.
 
@@ -105,6 +106,14 @@ def _run_generative(
     higher-detail original, so the normal map only captures decimation loss.
     """
     from .generative import GenerateRequest, GenerativeError, run_generate
+
+    if executor is not None:
+        # Registering here is what makes "our own GPU first" the default:
+        # auto-selection prefers trellis-remote over fal, and its availability
+        # is decided by probing this executor's host at generate time.
+        from .generative import make_trellis_backend, register_backend
+
+        register_backend(lambda: make_trellis_backend(executor), "trellis-remote")
 
     for name in ("sparse", "dense"):
         stages.append(
@@ -259,6 +268,7 @@ def run_build(
             split=split,
             max_parts=max_parts,
             object_hint=object_hint,
+            executor=executor,
         )
 
     # S2a Sparse

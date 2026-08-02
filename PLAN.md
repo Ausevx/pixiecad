@@ -16,8 +16,7 @@ flagged — never silent invention.
   - Retopology / UV / bake stack (meshoptimizer, QuadriFlow/Instant Meshes, xatlas,
     trimesh) is CPU and runs fine locally.
 - **LLMs cannot do geometry.** Their role is: photo triage feedback, part naming
-  (VLM on cluster renders), QA of result renders vs input photos, and code-gen.
-  Bulk VLM calls can be dispatched to agy/Gemini workers to save Anthropic quota.
+  (VLM on cluster renders), and QA of result renders vs input photos.
 - **Face-count control**: generative mesh models can't hit a target count
   (research consensus); a deterministic decimation/retopo stage can, exactly.
 - **Key open models** (for the optional GPU/cloud stage):
