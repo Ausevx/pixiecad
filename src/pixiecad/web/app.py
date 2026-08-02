@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from ..export import export_glb
 from ..meshops import bake_object_space_normals, clean_mesh, decimate_to_budget, unwrap_uv
+from ..session import new_session
 from ..spec import Dimensions, ObjectSpec
 from ..workspace import Workspace
 
@@ -24,6 +25,21 @@ from ..workspace import Workspace
 class OptimizeRequest(BaseModel):
     target_faces: int = Field(..., gt=0)
     normal_res: int = Field(1024, ge=64, le=4096)
+
+
+def _find_dense_ply(session_root: Path) -> Path | None:
+    """Locate a job's dense mesh, wherever the producing stage left it.
+
+    Dense output has landed in a few places across versions and backends
+    (session root for a manual drop-in, work/ for the executor, work/ws/ for
+    the stage cache), so all of them are searched rather than assuming one.
+    """
+    candidates = [
+        session_root / "dense.ply",
+        session_root / "work" / "dense.ply",
+        session_root / "work" / "ws" / "dense.ply",
+    ]
+    return next((p for p in candidates if p.exists()), None)
 
 
 def _call_build(**kwargs: Any) -> Any:
@@ -50,12 +66,8 @@ def create_app(root: Path) -> FastAPI:
     def _run_mesh_stages_sync(
         job_id: str, ws_root: Path, target_faces: int, normal_res: int = 1024
     ) -> None:
-        dense_ply = ws_root / "dense.ply"
-        if not dense_ply.exists() and ws_root.parent.exists():
-            dense_ply = ws_root.parent / "dense.ply"
-        if not dense_ply.exists():
-            dense_ply = ws_root / "ws" / "dense.ply"
-        if not dense_ply.exists():
+        dense_ply = _find_dense_ply(ws_root)
+        if dense_ply is None:
             raise FileNotFoundError("dense.ply not found")
 
         with lock:
@@ -100,7 +112,9 @@ def create_app(root: Path) -> FastAPI:
                 job["stage"] = "export"
                 job["log"].append("Exporting GLB model...")
 
-        glb_path = ws_root / "model.glb"
+        out_dir = ws_root / "output"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        glb_path = out_dir / "model.glb"
         export_glb(unwrap_res.mesh, glb_path, normal_map=normal_map)
 
         with lock:
@@ -132,8 +146,8 @@ def create_app(root: Path) -> FastAPI:
             job["log"].append("Starting full pipeline build...")
 
         try:
-            photos_dir = ws_root / "photos"
-            ws_dir = ws_root / "ws"
+            photos_dir = ws_root / "input"
+            ws_dir = ws_root / "work" / "ws"
 
             result = _call_build(
                 photos_dir=photos_dir,
@@ -183,6 +197,20 @@ def create_app(root: Path) -> FastAPI:
                     p_file = p_dict.get("file") or p_dict.get("name")
                     p_dict["url"] = f"/api/jobs/{job_id}/parts/{p_file}"
                     parts.append(p_dict)
+
+            # Publish the deliverables into the session's output/ folder. The
+            # workspace under work/ is scratch — the user should be able to
+            # delete it and still have the model and its parts.
+            if glb_path and Path(glb_path).exists():
+                out_dir = ws_root / "output"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                published = out_dir / "model.glb"
+                shutil.copy2(glb_path, published)
+                glb_path = str(published)
+                if parts_dir and Path(parts_dir).is_dir():
+                    published_parts = out_dir / "parts"
+                    shutil.copytree(parts_dir, published_parts, dirs_exist_ok=True)
+                    parts_dir = str(published_parts)
 
             summary_lines = result.summary_lines() if hasattr(result, "summary_lines") else []
 
@@ -235,10 +263,13 @@ def create_app(root: Path) -> FastAPI:
         object_hint: str | None = Form(None),
         backend: str | None = Form(None),
     ):
+        # One session folder per upload: input/, work/ and output/ are never
+        # shared between jobs, so two people uploading at once cannot read or
+        # overwrite each other's photos and meshes.
+        session = new_session(root, label=name or "object")
         job_id = uuid4().hex[:8]
-        job_dir = root / job_id
-        photos_dir = job_dir / "photos"
-        photos_dir.mkdir(parents=True, exist_ok=True)
+        job_dir = session.root
+        photos_dir = session.input_dir
 
         for f in files:
             fname = f.filename or f"photo_{uuid4().hex[:4]}.jpg"
@@ -252,11 +283,13 @@ def create_app(root: Path) -> FastAPI:
         dims = Dimensions.parse(length=l_val, width=w_val, height=h_val)
         spec = ObjectSpec(name=name or "object", target_faces=target_faces, dimensions=dims)
 
-        ws_dir = job_dir / "ws"
+        ws_dir = session.work_dir / "ws"
         Workspace.create(ws_dir, spec)
 
         backend_val = backend.strip() if backend and backend.strip() else None
         hint_val = object_hint.strip() if object_hint and object_hint.strip() else None
+
+        session.write_meta(job_id=job_id, name=spec.name, target_faces=target_faces)
 
         job_info: dict[str, Any] = {
             "job_id": job_id,
@@ -324,6 +357,11 @@ def create_app(root: Path) -> FastAPI:
                 "faces": job.get("faces"),
                 "parts": job.get("parts", []),
                 "warnings": job.get("warnings", []),
+                # Where this job's files actually live, so the user can open
+                # the session folder instead of hunting through the jobs root.
+                "session": Path(job["dir"]).name,
+                "dir": job["dir"],
+                "output_dir": str(Path(job["dir"]) / "output"),
             }
 
     @app.get("/api/jobs/{job_id}/parts/{filename:path}")
@@ -367,10 +405,7 @@ def create_app(root: Path) -> FastAPI:
                 raise HTTPException(status_code=404, detail="Job not found")
             job_dir = Path(job["dir"])
 
-        dense_ply = job_dir / "dense.ply"
-        if not dense_ply.exists():
-            dense_ply = job_dir / "ws" / "dense.ply"
-        if not dense_ply.exists():
+        if not _find_dense_ply(job_dir):
             raise HTTPException(
                 status_code=409,
                 detail="Dense mesh (dense.ply) not found for this job",
@@ -379,14 +414,14 @@ def create_app(root: Path) -> FastAPI:
         with lock:
             job["target_faces"] = req.target_faces
 
-        ws_dir = job_dir / "ws" if (job_dir / "ws").exists() else job_dir
-        ws = Workspace.open(ws_dir)
+        ws_dir = job_dir / "work" / "ws"
+        ws = Workspace.open(ws_dir if ws_dir.exists() else job_dir)
         spec = ws.spec()
         spec.target_faces = req.target_faces
         ws.update_spec(spec)
 
         try:
-            _run_mesh_stages_sync(job_id, ws_dir, req.target_faces, req.normal_res)
+            _run_mesh_stages_sync(job_id, job_dir, req.target_faces, req.normal_res)
         except Exception as exc:
             with lock:
                 job["status"] = "failed"

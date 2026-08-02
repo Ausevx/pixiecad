@@ -11,12 +11,13 @@ import trimesh
 
 from pixiecad.executors.base import Capabilities, GPUInfo, Job, JobResult
 from pixiecad.generative.trellis_remote import (
+    CONTAINER_NAME,
     DEFAULT_TRELLIS_IMAGE,
     TRELLIS_MIN_VRAM_MB,
     RemoteTrellisBackend,
     _get_generative_base,
     build_trellis_script,
-    docker_prefix,
+    docker_run_command,
     make_backend,
 )
 
@@ -81,50 +82,63 @@ class FakeExecutor:
 
 
 def test_build_trellis_script() -> None:
-    script_default = build_trellis_script()
-    assert "mkdir -p out" in script_default
-    assert script_default.startswith("mkdir -p out && ")
-    assert docker_prefix(DEFAULT_TRELLIS_IMAGE) in script_default
-    assert DEFAULT_TRELLIS_IMAGE in script_default
-    assert "--seed" not in script_default
-    assert "--no-texture" not in script_default
+    """The script must drive the worker's HTTP API, not a non-existent CLI."""
+    script = build_trellis_script(image_names=["00.png", "01.jpg"])
 
-    # Ensure mkdir segment is NOT containerised
-    parts = script_default.split(" && ")
-    assert parts[0] == "mkdir -p out"
-    assert parts[1].startswith("docker run ")
+    assert "mkdir -p out" in script
+    assert docker_run_command(DEFAULT_TRELLIS_IMAGE) in script
+    assert DEFAULT_TRELLIS_IMAGE in script
+    # Every staged view is posted, not just the first.
+    assert '-F "images=@images/00.png"' in script
+    assert '-F "images=@images/01.jpg"' in script
+    # Readiness is awaited before generating: the model loads in background.
+    assert "/ready" in script and "/generate" in script
+    # A pre-existing container is reused rather than restarted.
+    assert f"docker ps -q -f name=^{CONTAINER_NAME}$" in script
 
-    # Seed flag testing
-    script_seed = build_trellis_script(seed=7)
-    assert "--seed 7" in script_seed
+    assert "seed" not in build_trellis_script()
+    assert '-F "seed=7"' in build_trellis_script(seed=7)
 
-    # Texture flag testing
-    script_no_tex = build_trellis_script(texture=False)
-    assert "--no-texture" in script_no_tex
+    # There is no no-texture switch on the worker; the cheapest mode stands in.
+    assert '-F "texture_generation_mode=fast_512"' in build_trellis_script(texture=False)
 
-    # Custom image testing
     custom_img = "myrepo/trellis:v2"
-    script_custom = build_trellis_script(image=custom_img)
-    assert custom_img in script_custom
+    assert custom_img in build_trellis_script(image=custom_img)
+
+
+def test_build_trellis_script_options_are_allow_listed() -> None:
+    """Unknown options are dropped so a typo cannot alter generation silently."""
+    script = build_trellis_script(
+        options={"geometry_resolution": 1024, "nonsense_knob": "boom"}
+    )
+    assert '-F "geometry_resolution=1024"' in script
+    assert "nonsense_knob" not in script
 
 
 def test_available() -> None:
-    high_gpu = GPUInfo(name="A100", vram_mb=40000, compute_cap=8.0)
+    high_gpu = GPUInfo(name="NVIDIA L4", vram_mb=23034, compute_cap=8.9)
     low_gpu = GPUInfo(name="T4", vram_mb=16000, compute_cap=7.5)
 
     caps_ok = Capabilities(hostname="gpu-node", gpu=high_gpu, reachable=True)
     caps_low_vram = Capabilities(hostname="gpu-node", gpu=low_gpu, reachable=True)
     caps_unreachable = Capabilities(hostname="gpu-node", gpu=high_gpu, reachable=False)
 
+    # Enough VRAM, wrong architecture: the image ships Ada cubins only.
+    big_but_wrong_arch = GPUInfo(name="A100", vram_mb=40000, compute_cap=8.0)
+
     exec_ok = FakeExecutor(caps=caps_ok)
     exec_low_vram = FakeExecutor(caps=caps_low_vram)
     exec_unreachable = FakeExecutor(caps=caps_unreachable)
     exec_error = FakeExecutor(raise_on_probe=True)
+    exec_wrong_arch = FakeExecutor(
+        caps=Capabilities(hostname="gpu-node", gpu=big_but_wrong_arch, reachable=True)
+    )
 
     assert RemoteTrellisBackend(exec_ok).available() is True
     assert RemoteTrellisBackend(exec_low_vram).available() is False
     assert RemoteTrellisBackend(exec_unreachable).available() is False
     assert RemoteTrellisBackend(exec_error).available() is False
+    assert RemoteTrellisBackend(exec_wrong_arch).available() is False
 
 
 def test_generate_insufficient_vram(tmp_path: Path) -> None:
@@ -149,7 +163,7 @@ def test_generate_insufficient_vram(tmp_path: Path) -> None:
 
 
 def test_generate_happy_path(tmp_path: Path) -> None:
-    high_gpu = GPUInfo(name="A100", vram_mb=40000, compute_cap=8.0)
+    high_gpu = GPUInfo(name="NVIDIA L4", vram_mb=23034, compute_cap=8.9)
     caps_ok = Capabilities(hostname="gpu-node", gpu=high_gpu, reachable=True)
     executor = FakeExecutor(caps=caps_ok, write_mesh=True)
 
@@ -179,7 +193,7 @@ def test_generate_happy_path(tmp_path: Path) -> None:
 
 
 def test_generate_executor_failure(tmp_path: Path) -> None:
-    high_gpu = GPUInfo(name="A100", vram_mb=40000, compute_cap=8.0)
+    high_gpu = GPUInfo(name="NVIDIA L4", vram_mb=23034, compute_cap=8.9)
     caps_ok = Capabilities(hostname="gpu-node", gpu=high_gpu, reachable=True)
     fail_result = JobResult(
         returncode=1,
@@ -202,7 +216,7 @@ def test_generate_executor_failure(tmp_path: Path) -> None:
 
 
 def test_generate_missing_output_file(tmp_path: Path) -> None:
-    high_gpu = GPUInfo(name="A100", vram_mb=40000, compute_cap=8.0)
+    high_gpu = GPUInfo(name="NVIDIA L4", vram_mb=23034, compute_cap=8.9)
     caps_ok = Capabilities(hostname="gpu-node", gpu=high_gpu, reachable=True)
     executor = FakeExecutor(caps=caps_ok, write_mesh=False)
     backend = RemoteTrellisBackend(executor)

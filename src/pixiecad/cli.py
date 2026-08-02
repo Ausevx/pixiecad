@@ -214,6 +214,153 @@ def build(
 
 
 @app.command()
+def run(
+    photos: Path = typer.Argument(..., exists=True, file_okay=False, help="Photo directory"),
+    runs_root: Path = typer.Option(
+        "runs", "--runs", "-r", help="Root directory holding one folder per run"
+    ),
+    label: str = typer.Option(None, "--label", "-l", help="Name for this run (used in the folder name)"),
+    target_faces: int = typer.Option(20_000, "--faces", "-t", help="Total triangle budget"),
+    length: str = typer.Option(None, help="Real length, e.g. '5.6m'"),
+    width: str = typer.Option(None, help="Real width, e.g. '2.0m'"),
+    height: str = typer.Option(None, help="Real height, e.g. '0.95m'"),
+    host: str = typer.Option(None, help="SSH host for GPU stages (dense and/or generative)"),
+    backend: str = typer.Option(None, help="Generative backend (trellis-remote | fal | fake)"),
+    bake: bool = typer.Option(True, help="Bake a normal map"),
+    normal_res: int = typer.Option(1024, help="Normal map resolution (px)"),
+    split: bool = typer.Option(True, "--split/--no-split", help="Also export named parts"),
+    max_parts: int = typer.Option(8, help="Maximum number of parts"),
+    object_hint: str = typer.Option(None, "--object", help="What the object is, e.g. 'an F1 car'"),
+    drawings: bool = typer.Option(False, "--drawings", help="Also write ortho SVG drawings"),
+):
+    """Headless end-to-end run: photos in, .glb (+ parts) out, in a fresh session folder.
+
+    Creates ``<runs>/<timestamp>-<label>/`` holding ``input/``, ``work/`` and
+    ``output/``. Nothing outside that folder is touched, so runs never collide
+    and an old run stays reproducible.
+    """
+    from .executors import SSHExecutor
+    from .pipeline import run_build
+    from .session import new_session
+
+    session = new_session(runs_root, label=label, source=photos)
+    staged = session.stage_inputs(photos)
+    typer.echo(f"session: {session.root}")
+    typer.echo(f"input:   {len(staged)} image(s) → {session.input_dir}")
+
+    spec = ObjectSpec(
+        name=slugify_name(label) or "model",
+        dimensions=Dimensions.parse(length, width, height),
+        target_faces=target_faces,
+    )
+    ws = Workspace.create(session.work_dir / "ws", spec)
+
+    executor = SSHExecutor(host) if host else None
+    result = run_build(
+        session.input_dir, ws, executor=executor, dense=bool(host),
+        bake=bake, normal_res=normal_res, generative_backend=backend,
+        split=split, max_parts=max_parts, object_hint=object_hint,
+    )
+
+    typer.echo(f"regime:  {result.regime.value}")
+    for line in result.summary_lines():
+        typer.echo("  " + line)
+    for w in result.warnings:
+        typer.echo(f"⚠ {w}")
+
+    collected = collect_outputs(result, session, drawings=drawings, spec=spec)
+    session.write_meta(
+        photos_source=str(Path(photos).resolve()),
+        regime=result.regime.value,
+        target_faces=target_faces,
+        backend=backend,
+        host=host,
+        glb=collected.get("model"),
+        parts=[p["name"] for p in result.parts],
+    )
+
+    if not result.glb_path:
+        typer.echo(f"no model produced — inputs kept at {session.input_dir}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"\noutput:  {session.output_dir}")
+    typer.echo(f"  model.glb              {result.faces} faces")
+    for p in result.parts:
+        typer.echo(f"  parts/{Path(p['file']).name:<22} {p['faces']:>6} faces  ({p['name']})")
+    for extra in collected.get("drawings", []):
+        typer.echo(f"  {extra}")
+
+
+def slugify_name(label: str | None) -> str:
+    """Spec name from a user label (empty string when there is no label)."""
+    from .session import slugify
+
+    return slugify(label) if label else ""
+
+
+def collect_outputs(result, session, *, drawings: bool, spec) -> dict:
+    """Copy a build's deliverables out of the workspace into ``output/``.
+
+    The workspace is scratch — it holds the stage cache and every intermediate.
+    ``output/`` is what the user actually wants, under stable names, so a
+    downstream script never has to guess at a spec-derived filename.
+    """
+    import json
+    import shutil
+
+    collected: dict = {}
+    if result.glb_path:
+        dest = session.output_dir / "model.glb"
+        shutil.copy2(result.glb_path, dest)
+        collected["model"] = str(dest)
+
+    if result.parts:
+        parts_dir = session.output_dir / "parts"
+        parts_dir.mkdir(exist_ok=True)
+        for p in result.parts:
+            src = Path(p["file"])
+            if src.exists():
+                shutil.copy2(src, parts_dir / src.name)
+        src_manifest = Path(result.parts_dir) / "manifest.json" if result.parts_dir else None
+        if src_manifest and src_manifest.exists():
+            shutil.copy2(src_manifest, parts_dir / "manifest.json")
+
+    if drawings and result.glb_path:
+        import trimesh
+
+        from .meshops import render_all, save_views
+
+        mesh = trimesh.load(result.glb_path, force="mesh", process=False)
+        views = render_all(mesh, dimensions=spec.dimensions)
+        collected["drawings"] = [
+            str(p.relative_to(session.output_dir))
+            for p in save_views(views, session.output_dir / "drawings")
+        ]
+
+    build_json = session.output_dir / "build.json"
+    build_json.write_text(
+        json.dumps(
+            {
+                "session": session.session_id,
+                "regime": result.regime.value,
+                "faces": result.faces,
+                "scale_applied": result.scale_applied,
+                "warnings": result.warnings,
+                "parts": result.parts,
+                "stages": [
+                    {"name": s.name, "status": s.status, "detail": s.detail,
+                     "seconds": round(s.seconds, 3)}
+                    for s in result.stages
+                ],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return collected
+
+
+@app.command()
 def drawings(
     mesh_file: Path = typer.Argument(..., exists=True, help="Mesh file (.glb/.ply/.obj/.stl)"),
     out_dir: Path = typer.Option("drawings", "--out", "-o", help="Output directory"),

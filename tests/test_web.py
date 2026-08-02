@@ -161,7 +161,10 @@ def test_optimize_with_dense_mesh(tmp_path: Path):
         data={"name": "sphere"},
     )
     job_id = res.json()["job_id"]
-    job_dir = tmp_path / job_id
+    # The job lives in its own timestamped session folder, not one named after
+    # the opaque job id; the API is what tells you where.
+    job_dir = Path(client.get(f"/api/jobs/{job_id}").json()["dir"])
+    assert job_dir.parent == tmp_path
 
     # Create a dummy dense.ply in the job directory
     mesh = trimesh.creation.icosphere(subdivisions=2)
@@ -236,3 +239,27 @@ def test_full_pipeline_fake_backend_and_parts(client):
     assert unknown_res.status_code == 404
 
 
+
+
+def test_each_job_gets_its_own_session_folder(tmp_path: Path):
+    """Two uploads must never share input/ or output/ directories."""
+    client = TestClient(create_app(tmp_path))
+
+    ids = []
+    for i in (1, 2):
+        res = client.post(
+            "/api/jobs",
+            files=[("files", (f"photo{i}.jpg", _generate_test_jpeg(i), "image/jpeg"))],
+            data={"name": "car", "backend": "fake"},
+        )
+        ids.append(res.json()["job_id"])
+
+    a, b = (client.get(f"/api/jobs/{j}").json() for j in ids)
+
+    assert a["dir"] != b["dir"]
+    assert Path(a["dir"]).parent == tmp_path
+    # Timestamp-first naming keeps the folders sortable and human-readable.
+    assert "car" in a["session"]
+    # Each session holds only the photo that was uploaded to it.
+    assert [p.name for p in (Path(a["dir"]) / "input").iterdir()] == ["photo1.jpg"]
+    assert [p.name for p in (Path(b["dir"]) / "input").iterdir()] == ["photo2.jpg"]
