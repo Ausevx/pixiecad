@@ -268,11 +268,22 @@ class RemoteHunyuanBackend:
         ) == "1"
         self.timeout_s = timeout_s
 
+    # Why the last availability check failed, for whoever has to act on it.
+    # available() has to stay a bool for the registry, so the diagnosis is
+    # kept here rather than thrown away.
+    last_unavailable_reason: str = ""
+
     def available(self) -> bool:
         try:
-            return _gpu_supported(self.executor.probe())
-        except Exception:
+            caps = self.executor.probe()
+        except Exception as exc:
+            self.last_unavailable_reason = f"could not probe the host: {exc}"
             return False
+        if _gpu_supported(caps):
+            self.last_unavailable_reason = ""
+            return True
+        self.last_unavailable_reason = caps.why_not(HUNYUAN_MIN_VRAM_MB)
+        return False
 
     def generate(self, req: Any, out_dir: str | Path) -> Any:
         from .base import BackendUnavailable, GenerateResult, GenerativeError

@@ -8,6 +8,38 @@ from pathlib import Path
 from .base import Capabilities, GPUInfo, Job, JobResult, parse_nvidia_smi
 
 
+def _ssh_hint(stderr: str) -> str:
+    """Condense ssh's failure into one line, with the fix where there is one.
+
+    ssh emits twenty lines of banner for a changed host key and buries the
+    actionable sentence in the middle. Verbatim, that is unreadable in a job
+    log; discarded, it costs a real debugging session. So the known cases get
+    named and everything else falls back to the last non-empty line.
+    """
+    text = stderr.strip()
+    if not text:
+        return ""
+    low = text.lower()
+
+    if "host key verification failed" in low or "remote host identification has changed" in low:
+        return (
+            "SSH host key mismatch. This is normal after a VM is recreated with "
+            "the same name -- the new machine has a new key. Refresh the alias "
+            "with: gcloud compute config-ssh"
+        )
+    if "permission denied" in low:
+        return "SSH permission denied -- check the key and the login user"
+    if "could not resolve hostname" in low or "name or service not known" in low:
+        return "hostname does not resolve -- is the alias from gcloud compute config-ssh?"
+    if "connection refused" in low:
+        return "connection refused -- the host may still be booting"
+    if "connection timed out" in low or "operation timed out" in low:
+        return "connection timed out -- check the VM is running and the firewall allows SSH"
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return lines[-1][:200] if lines else ""
+
+
 class SSHExecutor:
     def __init__(
         self,
@@ -55,9 +87,16 @@ class SSHExecutor:
         try:
             res = self._exec(echo_cmd, timeout_s=5)
             if res.returncode != 0:
-                return Capabilities(hostname=self.host, gpu=None, reachable=False)
-        except Exception:
-            return Capabilities(hostname=self.host, gpu=None, reachable=False)
+                return Capabilities(
+                    hostname=self.host,
+                    gpu=None,
+                    reachable=False,
+                    detail=_ssh_hint(res.stderr or ""),
+                )
+        except Exception as exc:
+            return Capabilities(
+                hostname=self.host, gpu=None, reachable=False, detail=str(exc)
+            )
 
         smi_cmd = [
             "ssh",
@@ -66,14 +105,19 @@ class SSHExecutor:
             "nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader,nounits",
         ]
         gpu: GPUInfo | None = None
+        detail = ""
         try:
             smi_res = self._exec(smi_cmd, timeout_s=10)
             if smi_res.returncode == 0:
                 gpu = parse_nvidia_smi(smi_res.stdout)
-        except Exception:
-            gpu = None
+                if gpu is None:
+                    detail = f"nvidia-smi output not understood: {smi_res.stdout[:200]!r}"
+            else:
+                detail = _ssh_hint(smi_res.stderr or "") or "nvidia-smi failed"
+        except Exception as exc:
+            detail = str(exc)
 
-        return Capabilities(hostname=self.host, gpu=gpu, reachable=True)
+        return Capabilities(hostname=self.host, gpu=gpu, reachable=True, detail=detail)
 
     def run(self, job: Job) -> JobResult:
         start_time = time.monotonic()

@@ -110,8 +110,16 @@ def get_backend(name: str | None = None) -> GenerativeBackend:
                 f"Failed to instantiate backend '{name}': {e}. Registered backends: {registered_names}"
             ) from e
         if not backend.available():
+            # The registered-name list is only useful when the NAME was wrong.
+            # When the name was right and the host was not reachable, printing
+            # it sends people hunting for a typo instead of at the host -- which
+            # is exactly what happened with a stale SSH host key.
+            reason = getattr(backend, "last_unavailable_reason", "") or ""
             raise BackendUnavailable(
-                f"Backend '{name}' is not available. Registered backends: {registered_names}"
+                f"Backend '{name}' is not available: {reason}"
+                if reason
+                else f"Backend '{name}' is not available. "
+                f"Registered backends: {registered_names}"
             )
         return backend
 

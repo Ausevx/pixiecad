@@ -17,9 +17,29 @@ class Capabilities:
     hostname: str
     gpu: GPUInfo | None
     reachable: bool
+    # Why the probe came back empty. A bare False sent one real job looking
+    # for a wrong backend NAME when the actual cause was a stale SSH host key
+    # -- the diagnosis existed in ssh's stderr and was thrown away.
+    detail: str = ""
 
     def cuda_ok(self, min_vram_mb: int = 0) -> bool:
         return self.reachable and self.gpu is not None and self.gpu.vram_mb >= min_vram_mb
+
+    def why_not(self, min_vram_mb: int = 0) -> str:
+        """Plain-language reason ``cuda_ok`` is False, or "" when it is True."""
+        if not self.reachable:
+            return f"cannot reach '{self.hostname}'" + (f": {self.detail}" if self.detail else "")
+        if self.gpu is None:
+            return (
+                f"'{self.hostname}' is reachable but reports no GPU"
+                + (f": {self.detail}" if self.detail else "")
+            )
+        if self.gpu.vram_mb < min_vram_mb:
+            return (
+                f"'{self.hostname}' has {self.gpu.name} with {self.gpu.vram_mb} MB VRAM; "
+                f"{min_vram_mb} MB is needed"
+            )
+        return ""
 
 
 @dataclass
