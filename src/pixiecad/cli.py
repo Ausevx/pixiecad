@@ -570,9 +570,7 @@ def backends():
         mark = "✓" if name in usable else "✗"
         note = "" if name in usable else "  (not configured)"
         typer.echo(f"  {mark} {name}{note}")
-    if "fal" not in usable:
-        typer.echo("\nfal needs an API key:  export FAL_KEY=...")
-    typer.echo("trellis-remote needs a 24GB GPU host:  pixiecad probe --host <alias>")
+    typer.echo("\nremote backends need a GPU host:  pixiecad probe --host <alias>")
 
 
 @app.command()

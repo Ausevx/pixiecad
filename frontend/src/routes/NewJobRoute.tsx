@@ -92,21 +92,15 @@ function BackendPicker({
   hasGpuHost: boolean;
 }) {
   const [list, setList] = useState<BackendOption[]>([]);
-  const [falKey, setFalKey] = useState(false);
 
   useEffect(() => {
     getBackends()
-      .then((r) => {
-        setList(r.backends);
-        setFalKey(r.fal_key_present);
-      })
+      .then((r) => setList(r.backends))
       .catch(() => undefined);
   }, []);
 
   const runnable = (b: BackendOption) =>
-    b.requires === null ||
-    (b.requires === "gpu_host" && hasGpuHost) ||
-    (b.requires === "fal_key" && falKey);
+    b.requires === null || (b.requires === "gpu_host" && hasGpuHost);
 
   const selected = list.find((b) => b.key === value);
 
@@ -123,9 +117,7 @@ function BackendPicker({
           <option key={b.key} value={b.key} disabled={!runnable(b)}>
             {b.label}
             {!runnable(b)
-              ? b.requires === "gpu_host"
-                ? " — needs a GPU host"
-                : " — needs FAL_KEY"
+              ? " — needs a GPU host"
               : b.validated
                 ? ""
                 : " — unvalidated"}

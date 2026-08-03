@@ -28,8 +28,8 @@ pixiecad/
 │   │   ├── sparse.py        S2a — pycolmap: camera poses + sparse point cloud
 │   │   └── dense.py         S2b — COLMAP dense stereo, runs in Docker on a GPU host
 │   ├── generative/          S3  — image→mesh when there aren't enough photos to
-│   │   ├── base.py            triangulate (fal.ai backend, self-hosted TRELLIS
-│   │   ├── fal_backend.py     backend, or the "fake" backend used in tests)
+│   │   ├── base.py            triangulate (self-hosted Hunyuan3D or TRELLIS
+│   │   │                       on a GPU host, or "fake" for tests)
 │   │   └── trellis_remote.py
 │   ├── meshops/
 │   │   ├── cleanup.py       S4  — weld verts, drop degenerate faces, remove floaters

@@ -1226,21 +1226,7 @@ def create_app(root: Path) -> FastAPI:
                         "DINOv3 encoder. Expect to debug it."
                     ),
                 },
-                {
-                    "key": "fal",
-                    "label": "fal.ai (hosted)",
-                    "requires": "fal_key",
-                    "validated": False,
-                    "note": (
-                        "Third-party paid API, billed per generation to a "
-                        "separate account. Needs FAL_KEY in the server's "
-                        "environment. Your photos leave your machine."
-                    ),
-                },
             ],
-            # Reported so the client does not have to guess whether the paid
-            # fallback is even configured.
-            "fal_key_present": bool(os.environ.get("FAL_KEY", "").strip()),
         }
 
     @app.get("/api/gpu-options")

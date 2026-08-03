@@ -63,11 +63,15 @@ class GenerativeBackend(Protocol):
 
 _REGISTRY: dict[str, Callable[[], GenerativeBackend]] = {}
 
-# Order tried when no backend is named: self-hosted GPU first (spends existing
-# cloud credits), then fal.ai (separate paid account, configurable backup).
-# hunyuan-remote first: it is the only self-hosted option with no gated
-# dependency, so it cannot be blocked by a third party's approval queue.
-AUTO_PRIORITY = ["hunyuan-remote", "trellis-remote", "fal"]
+# Order tried when no backend is named. hunyuan-remote first: it is the only
+# option with no gated dependency, so it cannot be blocked by a third party's
+# approval queue, and it is the only one that has ever produced a model here.
+#
+# Every backend in this list is self-hosted by design. A hosted third-party
+# API (fal.ai) lived here briefly and was removed: it would have uploaded the
+# user's photos off the machine, which is the exact thing building from
+# Tencent's own source was meant to avoid.
+AUTO_PRIORITY = ["hunyuan-remote", "trellis-remote"]
 
 
 def register_backend(factory: Callable[[], GenerativeBackend], name: str) -> None:
@@ -111,8 +115,8 @@ def get_backend(name: str | None = None) -> GenerativeBackend:
             )
         return backend
 
-    # Auto-selection order: our own GPU (GCP credits) before third-party paid
-    # APIs; "fake" is a test double and must never be picked implicitly.
+    # Auto-selection order is AUTO_PRIORITY, then anything else registered;
+    # "fake" is a test double and must never be picked implicitly.
     ordered = [n for n in AUTO_PRIORITY if n in _REGISTRY] + [
         n for n in _REGISTRY if n not in AUTO_PRIORITY and n != "fake"
     ]
@@ -125,9 +129,9 @@ def get_backend(name: str | None = None) -> GenerativeBackend:
             pass
 
     raise BackendUnavailable(
-        "No generative backend is usable. Options: provision a GPU host and pass "
-        "an executor (trellis-remote, uses your cloud credits), set FAL_KEY "
-        "(fal.ai, paid per model), or request 'fake' explicitly for tests. "
+        "No generative backend is usable. Provision a GPU host and pass an "
+        "executor (hunyuan-remote, or trellis-remote on an L4), or request "
+        "'fake' explicitly for tests. "
         f"Registered backends: {registered_names}"
     )
 

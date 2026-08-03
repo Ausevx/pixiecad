@@ -975,10 +975,21 @@ class TestBackendSelection:
     def test_lists_backends_with_requirements(self, client):
         d = client.get("/api/backends").json()
         keys = {b["key"] for b in d["backends"]}
-        assert {"auto", "hunyuan-remote", "trellis-remote", "fal"} <= keys
+        assert {"auto", "hunyuan-remote", "trellis-remote"} <= keys
         for b in d["backends"]:
-            assert b["requires"] in (None, "gpu_host", "fal_key")
+            assert b["requires"] in (None, "gpu_host")
             assert b["note"]
+
+    def test_no_third_party_hosted_backend_is_offered(self):
+        """fal.ai was removed deliberately: it would have uploaded the user's
+        photos off the machine. Nothing in the registry or the auto order may
+        quietly bring a hosted backend back."""
+        from pixiecad.generative.base import AUTO_PRIORITY, _REGISTRY
+
+        import pixiecad.generative  # noqa: F401  (registers what registers)
+
+        assert "fal" not in AUTO_PRIORITY
+        assert "fal" not in _REGISTRY
 
     def test_auto_is_first_and_needs_nothing(self, client):
         first = client.get("/api/backends").json()["backends"][0]
@@ -991,7 +1002,6 @@ class TestBackendSelection:
         by_key = {b["key"]: b for b in client.get("/api/backends").json()["backends"]}
         assert by_key["hunyuan-remote"]["validated"] is True
         assert by_key["trellis-remote"]["validated"] is False
-        assert by_key["fal"]["validated"] is False
 
     def test_auto_is_translated_to_no_backend(self, client):
         """'auto' is the dashboard's word; the pipeline spells it None. Passing

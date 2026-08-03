@@ -185,7 +185,7 @@ export interface BackendOption {
   key: string;
   label: string;
   /** What must exist for this backend to run at all, or null for none. */
-  requires: "gpu_host" | "fal_key" | null;
+  requires: "gpu_host" | null;
   /** False when the backend has never produced a model on this project. */
   validated: boolean;
   note: string;
@@ -193,7 +193,6 @@ export interface BackendOption {
 
 export interface BackendList {
   backends: BackendOption[];
-  fal_key_present: boolean;
 }
 
 /** GET /api/cloud/inventory */
