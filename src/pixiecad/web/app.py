@@ -17,6 +17,7 @@ from uuid import uuid4
 import trimesh
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..export import export_glb
@@ -174,6 +175,10 @@ def create_app(root: Path) -> FastAPI:
     provisioning: dict[str, Any] = {}
 
     static_index = Path(__file__).parent / "static" / "index.html"
+    # The React bundle. Built by `npm run build` in frontend/, which writes
+    # here. Absent in a source checkout that has never run the build, so every
+    # use of it is guarded rather than assumed.
+    spa_dir = Path(__file__).parent / "static" / "dist"
 
     def _run_mesh_stages_sync(
         job_id: str, ws_root: Path, target_faces: int, normal_res: int = 1024
@@ -442,6 +447,37 @@ def create_app(root: Path) -> FastAPI:
         if static_index.exists():
             return static_index.read_text(encoding="utf-8")
         return "<html><body><h1>PixieCAD Dashboard</h1></body></html>"
+
+    # ── The React SPA ────────────────────────────────────────────────────
+    # Mounted at /ui rather than / so the legacy dashboard keeps working while
+    # the new one is built: there is never a window where the tool is broken.
+    if (spa_dir / "index.html").is_file():
+        app.mount(
+            "/ui/assets",
+            StaticFiles(directory=spa_dir / "assets"),
+            name="spa-assets",
+        )
+
+        @app.get("/ui", response_class=HTMLResponse)
+        @app.get("/ui/{spa_path:path}", response_class=HTMLResponse)
+        def spa(spa_path: str = ""):
+            """Serve the SPA shell for any /ui path.
+
+            Client-side routes like /ui/jobs/abc123 do not exist on disk, so a
+            hard reload or a pasted link would 404 without this. Deep links
+            surviving a reload is the whole point of moving job state into the
+            URL, so the fallback is not optional.
+            """
+            # A real file under the bundle (favicon, manifest, source map) is
+            # served as itself; only unknown paths fall through to the shell.
+            if spa_path:
+                candidate = (spa_dir / spa_path).resolve()
+                if (
+                    str(candidate).startswith(str(spa_dir.resolve()) + os.sep)
+                    and candidate.is_file()
+                ):
+                    return FileResponse(candidate)
+            return (spa_dir / "index.html").read_text(encoding="utf-8")
 
     @app.post("/api/jobs")
     async def create_job(

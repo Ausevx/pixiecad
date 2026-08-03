@@ -574,3 +574,62 @@ class TestBakedImagePreference:
         src = inspect.getsource(m.create_app)
         assert "no baked machine image found" in src
         assert "provision_gpu_vm.sh" in src
+
+
+class TestSpaServing:
+    """The React bundle, and the deep links it depends on.
+
+    The whole point of moving job state into the URL is that a job survives a
+    reload -- so /ui/jobs/<id>, which exists only in the client router, must
+    return the shell rather than a 404.
+    """
+
+    @pytest.fixture
+    def spa_built(self):
+        from pixiecad.web import app as m
+
+        dist = pathlib.Path(m.__file__).parent / "static" / "dist"
+        if not (dist / "index.html").is_file():
+            pytest.skip("SPA bundle not built; run `npm run build` in frontend/")
+        return dist
+
+    def test_legacy_dashboard_still_served_at_root(self, client, spa_built):
+        """The old dashboard must keep working while the new one is built."""
+        res = client.get("/")
+        assert res.status_code == 200
+        assert "PixieCAD" in res.text
+
+    def test_spa_shell_at_ui(self, client, spa_built):
+        res = client.get("/ui")
+        assert res.status_code == 200
+        assert 'id="root"' in res.text
+
+    @pytest.mark.parametrize(
+        "path", ["/ui/", "/ui/new", "/ui/jobs/abc123", "/ui/jobs/abc123?compute=1"]
+    )
+    def test_client_routes_fall_back_to_the_shell(self, client, spa_built, path):
+        res = client.get(path)
+        assert res.status_code == 200, f"{path} must not 404"
+        assert 'id="root"' in res.text
+
+    def test_real_bundle_files_are_served_as_themselves(self, client, spa_built):
+        """A hashed asset must return the asset, not the HTML shell."""
+        import re
+
+        shell = client.get("/ui").text
+        match = re.search(r'/ui/assets/([^"\']+\.js)', shell)
+        assert match, "the shell should reference a hashed JS bundle"
+        res = client.get(f"/ui/assets/{match.group(1)}")
+        assert res.status_code == 200
+        assert 'id="root"' not in res.text
+
+    def test_traversal_out_of_the_bundle_is_refused(self, client, spa_built):
+        """A path escaping the bundle must fall through to the shell, never
+        serve a file from elsewhere on disk."""
+        res = client.get("/ui/../../../../etc/passwd")
+        assert "root:" not in res.text
+
+    def test_api_is_not_shadowed_by_the_spa(self, client, spa_built):
+        res = client.get("/api/jobs")
+        assert res.status_code == 200
+        assert res.json() == []

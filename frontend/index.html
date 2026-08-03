@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>PixieCAD</title>
+    <!-- Painted before the bundle parses, so a slow first load shows the app's
+         own near-black rather than a white flash on a dark-adapted screen. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #06070a;
+      }
+    </style>
+  </head>
+  <body>
+    <a
+      href="#main"
+      style="
+        position: absolute;
+        left: -9999px;
+        top: 0;
+        z-index: 100;
+        padding: 0.5rem 0.75rem;
+        background: #ffb230;
+        color: #06070a;
+        font: 600 12px ui-monospace, monospace;
+      "
+      onfocus="this.style.left='0.5rem';this.style.top='0.5rem'"
+      onblur="this.style.left='-9999px'"
+      >Skip to main content</a
+    >
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

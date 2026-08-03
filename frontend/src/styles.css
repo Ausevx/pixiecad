@@ -1,0 +1,148 @@
+@import "tailwindcss";
+
+/* ─────────────────────────────────────────────────────────────────────────
+   PixieCAD — engineering terminal
+   Near-black canvas, one accent, monospace for anything a machine produced.
+   Every colour here is a token; no component invents its own.
+   ───────────────────────────────────────────────────────────────────────── */
+
+@theme {
+  /* Surfaces. Four steps, deliberately close together — depth comes from
+     hairline borders, not from a big luminance range. */
+  --color-void: #06070a;
+  --color-panel: #0b0d12;
+  --color-raised: #111520;
+  --color-hover: #171c29;
+
+  /* One accent. Amber reads as instrumentation rather than SaaS blue, and it
+     stays legible against near-black without the halo a saturated cyan gets. */
+  --color-accent: #ffb230;
+  --color-accent-dim: #7a5416;
+  --color-accent-wash: #1c1408;
+
+  /* Status. Only these four — a fifth would dilute what a colour means. */
+  --color-ok: #4ade80;
+  --color-warn: #fbbf24;
+  --color-fail: #f87171;
+  --color-idle: #64748b;
+
+  /* Text. AA against --color-panel at every step. */
+  --color-ink: #e8ecf4;
+  --color-ink-dim: #97a1b4;
+  --color-ink-faint: #5b6577;
+
+  --color-rule: #1c2231;
+  --color-rule-bright: #2a3244;
+
+  --font-mono: "Berkeley Mono", "SF Mono", "JetBrains Mono", ui-monospace,
+    "Menlo", "Consolas", monospace;
+  --font-sans: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+
+  --radius-sharp: 2px;
+  --radius-panel: 4px;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background: var(--color-void);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* The background field is a fixed canvas behind everything; the page must
+       never bounce past it and reveal a bare edge. */
+    overscroll-behavior: none;
+  }
+
+  /* Anything a machine produced — ids, byte counts, timings, face counts,
+     paths, log lines — is monospace and tabular. Numbers that change while
+     you watch them must not reflow the row they sit in. */
+  code,
+  kbd,
+  samp,
+  pre,
+  .mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "zero" 1;
+  }
+
+  /* A visible focus ring on every interactive element, always. This is a
+     keyboard-first tool and an invisible focus ring makes it unusable. */
+  :focus-visible {
+    outline: 1px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--color-accent);
+    color: var(--color-void);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-rule-bright);
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-ink-faint);
+    background-clip: content-box;
+  }
+}
+
+@layer utilities {
+  /* Hairline panel edge. Used everywhere instead of a box-shadow, which on a
+     near-black surface reads as mud. */
+  .rule {
+    border: 1px solid var(--color-rule);
+  }
+
+  /* Screen-reader-only. Every piece of ASCII art on this page is aria-hidden
+     and pairs with one of these carrying the real text. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+}
+
+/* ── Reduced motion ───────────────────────────────────────────────────────
+   Replacement, not shortening. Motion-driven animation is disabled through
+   MotionConfig in React; this handles the CSS-driven remainder and is the
+   backstop if a component forgets. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
