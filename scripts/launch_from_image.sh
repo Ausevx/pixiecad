@@ -60,6 +60,39 @@ nvidia-smi --query-gpu=name --format=csv,noheader
 sudo docker images --format "{{.Repository}}:{{.Tag}}" | sort
 '
 
+# Self-healing patch for images baked before a dependency was discovered.
+#
+# The paint stack remeshes before painting, and trimesh 4.x delegates that to
+# fast_simplification rather than implementing it. A machine image baked before
+# that was known texturs nothing: the stage dies with ModuleNotFoundError after
+# the pipeline has already loaded, and the job completes untextured with only a
+# warning. Rather than requiring everyone to remember to rebake, the launch
+# checks and repairs in place -- a no-op on a current image, ~20 s on an old
+# one, and it means a stale image degrades to "slightly slower launch" instead
+# of "textures silently do not work".
+#
+# Delete this block once no pre-fix machine images remain.
+echo "checking paint image dependencies ..."
+gcloud compute ssh "$NAME" --project="$PROJECT" --zone="$ZONE" --quiet --command='
+set -e
+IMG=pixiecad-hunyuan-paint:latest
+if ! sudo docker image inspect "$IMG" >/dev/null 2>&1; then
+  echo "  no paint image on this host; skipping"
+  exit 0
+fi
+if sudo docker run --rm "$IMG" python -c "import fast_simplification" 2>/dev/null; then
+  echo "  fast_simplification present"
+  exit 0
+fi
+echo "  patching $IMG with fast_simplification ..."
+sudo docker rm -f pixiecad-paintfix >/dev/null 2>&1 || true
+sudo docker run --name pixiecad-paintfix "$IMG" \
+  pip install --no-cache-dir --quiet fast_simplification
+sudo docker commit pixiecad-paintfix "$IMG" >/dev/null
+sudo docker rm pixiecad-paintfix >/dev/null
+sudo docker run --rm "$IMG" python -c "import fast_simplification; print(\"  patched OK\")"
+' || echo "WARNING: paint dependency check failed; texturing may not work"
+
 gcloud compute config-ssh --quiet >/dev/null 2>&1 || true
 echo
 echo "ready:  $NAME.$ZONE.$PROJECT"
