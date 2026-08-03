@@ -148,3 +148,159 @@ def options_payload(*, texture: bool = True, semantic: bool = True) -> list[dict
         entry["cold"] = estimate(option, texture=texture, semantic=semantic, warm=False)
         payload.append(entry)
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Per-stage cost, so the new-job form can say what a job will actually take
+# before it is submitted rather than after.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StageCost:
+    """One stage's wall time and memory, and where the number came from.
+
+    ``basis`` is not decoration. A user deciding whether to bake at 2048 on a
+    16 GB machine is making a real resource decision, and an invented figure
+    presented in the same typeface as a measured one makes that decision worse
+    than showing nothing.
+    """
+
+    key: str
+    label: str
+    where: str  # "local" | "host"
+    seconds: float | None
+    peak_ram_mb: int | None
+    basis: str  # "measured" | "estimated"
+    detail: str
+
+
+# Measured on this project, 2026-08-04, on the 16 GB M3 dev machine, against a
+# 1.31M face source decimated to 20k -- the shape a generative backend actually
+# returns. Timing and peak RSS captured together per run.
+BAKE_LOCAL: dict[int, tuple[float, int]] = {
+    512: (6.0, 1759),
+    1024: (13.6, 3367),
+    2048: (52.9, 4118),
+}
+
+# Raw arrays, float32 vertices, savez_compressed: 11.7 MB for the pair at
+# 1.31M faces. Transfer time is whatever the user's uplink is, so it is
+# reported as a size and a range rather than as a single fabricated duration.
+BAKE_UPLOAD_MB = 11.7
+
+# The dev machine's entire local pipeline outside baking -- ingest, clean,
+# decimate, unwrap, parts export -- measured at 247 MB peak in 1.9 s.
+LOCAL_BASELINE_MB = 247
+
+
+def bake_cost(resolution: int, *, where: str) -> StageCost:
+    """What a normal-map bake costs at this resolution, here or on the host."""
+    nearest = min(BAKE_LOCAL, key=lambda r: abs(r - resolution))
+    seconds, ram = BAKE_LOCAL[nearest]
+    exact = nearest == resolution
+
+    if where == "host":
+        return StageCost(
+            key="bake",
+            label=f"normal map {resolution}x{resolution} (host)",
+            where="host",
+            seconds=None,
+            peak_ram_mb=0,
+            basis="estimated",
+            detail=(
+                f"{BAKE_UPLOAD_MB:.1f} MB uploaded, then baked on the host's "
+                "CPU. Costs this machine nothing but the transfer. Never run "
+                "end-to-end, so no measured time yet."
+            ),
+        )
+    return StageCost(
+        key="bake",
+        label=f"normal map {resolution}x{resolution} (this machine)",
+        where="local",
+        seconds=seconds,
+        peak_ram_mb=ram,
+        basis="measured" if exact else "estimated",
+        detail=(
+            f"By far the heaviest local stage -- everything else combined "
+            f"peaks at {LOCAL_BASELINE_MB} MB. Runs while you are using the "
+            "machine."
+        )
+        + ("" if exact else f" Interpolated from the measured {nearest}x{nearest}."),
+    )
+
+
+def stage_costs(
+    *,
+    bake: bool = True,
+    normal_res: int = 1024,
+    bake_location: str = "auto",
+    texture: bool = False,
+    semantic: bool = False,
+    has_host: bool = False,
+    gpu_key: str = "l4",
+) -> dict:
+    """Every stage a job as configured will run, with its cost and provenance."""
+    option = next((o for o in GPU_OPTIONS if o.key == gpu_key), GPU_OPTIONS[0])
+    stages: list[StageCost] = [
+        StageCost(
+            key="local_pipeline",
+            label="ingest, clean, decimate, unwrap, export",
+            where="local",
+            seconds=1.9,
+            peak_ram_mb=LOCAL_BASELINE_MB,
+            basis="measured",
+            detail="Measured on 8 photos at 1024px. Scales with photo count.",
+        )
+    ]
+
+    if has_host:
+        stages.append(
+            StageCost(
+                key="generate",
+                label="shape generation",
+                where="host",
+                seconds=float(option.gen_seconds),
+                peak_ram_mb=0,
+                basis="measured" if option.key == "l4" else "estimated",
+                detail=f"{option.speed_basis} on {option.label}.",
+            )
+        )
+    if texture and has_host:
+        stages.append(
+            StageCost(
+                key="texture",
+                label="texturing",
+                where="host",
+                seconds=float(option.texture_seconds),
+                peak_ram_mb=0,
+                basis="measured" if option.key == "l4" else "estimated",
+                detail="2048x2048 PBR maps.",
+            )
+        )
+    if semantic and has_host:
+        stages.append(
+            StageCost(
+                key="segment",
+                label="semantic segmentation (SAM)",
+                where="host",
+                seconds=float(option.sam_seconds),
+                peak_ram_mb=0,
+                basis="measured" if option.key == "l4" else "estimated",
+                detail="14 views at 768px. Cached, so a re-run is free.",
+            )
+        )
+
+    resolved = "host" if (bake_location in ("auto", "host") and has_host) else "local"
+    if bake:
+        stages.append(bake_cost(normal_res, where=resolved))
+
+    local_peak = max([s.peak_ram_mb or 0 for s in stages if s.where == "local"] or [0])
+    known = [s.seconds for s in stages if s.seconds is not None]
+    return {
+        "stages": [asdict(s) for s in stages],
+        "local_peak_ram_mb": local_peak,
+        "total_known_seconds": round(sum(known), 1),
+        "has_unmeasured": any(s.seconds is None for s in stages),
+        "bake_location_resolved": resolved if bake else None,
+    }

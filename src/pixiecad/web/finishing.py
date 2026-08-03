@@ -53,6 +53,10 @@ class FinishOptions:
     # 16 GB dev machine's limit while its owner is still using it.
     bake_normals: bool = True
     normal_res: int = 1024
+    # "auto" resolves to the host whenever one is configured, because the host
+    # is already provisioned and already billed for the job, while this machine
+    # is the one its owner is using. "local" and "host" are explicit overrides.
+    bake_location: str = "auto"  # "auto" | "local" | "host"
     # Needed only by the stages that run on a GPU; absent means those stages
     # are skipped with an explanation rather than failing the whole job.
     gpu_host: str | None = None

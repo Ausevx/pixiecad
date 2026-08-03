@@ -387,6 +387,16 @@ def create_app(root: Path) -> FastAPI:
                 dense=False,
                 bake=finish.bake_normals if finish else False,
                 normal_res=finish.normal_res if finish else 1024,
+                # "auto" only becomes "host" when there is actually a host to
+                # send it to; without an executor the pipeline would have no
+                # way to run it there and would silently bake locally anyway.
+                bake_location=(
+                    "host"
+                    if finish
+                    and executor is not None
+                    and finish.bake_location in ("auto", "host")
+                    else "local"
+                ),
                 executor=executor,
                 generative_backend=backend,
                 split=split,
@@ -679,6 +689,7 @@ def create_app(root: Path) -> FastAPI:
         multiview: bool = Form(False),
         bake_normals: bool = Form(True),
         normal_res: int = Form(1024),
+        bake_location: str = Form("auto"),
     ):
         # One session folder per upload: input/, work/ and output/ are never
         # shared between jobs, so two people uploading at once cannot read or
@@ -752,6 +763,9 @@ def create_app(root: Path) -> FastAPI:
             gpu_host=(gpu_host.strip() or None) if gpu_host else None,
             bake_normals=bake_normals,
             normal_res=normal_res,
+            bake_location=(
+                bake_location if bake_location in ("auto", "local", "host") else "auto"
+            ),
         )
 
         # Geometric detail of the generative decode. This is the lever that
@@ -796,6 +810,7 @@ def create_app(root: Path) -> FastAPI:
                 "gpu_host": finish.gpu_host,
                 "bake_normals": finish.bake_normals,
                 "normal_res": finish.normal_res,
+                "bake_location": finish.bake_location,
             },
             "web_url": None,
         }
@@ -1240,6 +1255,32 @@ def create_app(root: Path) -> FastAPI:
                 },
             ],
         }
+
+    @app.get("/api/stage-costs")
+    def stage_costs_endpoint(
+        bake: bool = True,
+        normal_res: int = 1024,
+        bake_location: str = "auto",
+        texture: bool = False,
+        semantic: bool = False,
+        has_host: bool = False,
+    ):
+        """What a job as configured will cost, before it is submitted.
+
+        Split by where the work lands, because the two are not interchangeable:
+        host seconds are billed but cost this machine nothing, while local
+        seconds compete with whatever else the user is doing on a 16 GB laptop.
+        """
+        from pixiecad.cloud_options import stage_costs
+
+        return stage_costs(
+            bake=bake,
+            normal_res=normal_res,
+            bake_location=bake_location,
+            texture=texture,
+            semantic=semantic,
+            has_host=has_host,
+        )
 
     @app.get("/api/gpu-options")
     def gpu_options(texture: bool = True, semantic: bool = True):

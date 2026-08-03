@@ -1153,3 +1153,76 @@ class TestBackendSelection:
         body = route.read_text()
         assert "BackendPicker" in body
         assert "backend," in body, "backend must be included in the request params"
+
+
+class TestBakeLocation:
+    """Where the bake runs is a user choice, and it must survive the trip."""
+
+    def test_stage_costs_reports_local_memory(self, client):
+        d = client.get("/api/stage-costs?bake=true&normal_res=1024&has_host=false").json()
+        assert d["bake_location_resolved"] == "local"
+        # The whole point of the panel: baking dominates local memory.
+        assert d["local_peak_ram_mb"] > 3000
+
+    def test_a_host_takes_the_bake_off_this_machine(self, client):
+        """auto + a host must drop local peak back to the non-bake baseline."""
+        d = client.get("/api/stage-costs?bake=true&normal_res=1024&has_host=true").json()
+        assert d["bake_location_resolved"] == "host"
+        assert d["local_peak_ram_mb"] < 500, (
+            "baking on the host must not still charge this machine 3 GB"
+        )
+
+    def test_explicit_local_overrides_an_available_host(self, client):
+        d = client.get(
+            "/api/stage-costs?bake=true&normal_res=1024"
+            "&bake_location=local&has_host=true"
+        ).json()
+        assert d["bake_location_resolved"] == "local"
+
+    def test_unmeasured_stages_are_flagged_not_invented(self, client):
+        """Remote baking has never run end to end; it must say so rather than
+        show a fabricated duration next to the measured ones."""
+        d = client.get("/api/stage-costs?bake=true&bake_location=host&has_host=true").json()
+        bake = next(s for s in d["stages"] if s["key"] == "bake")
+        assert bake["seconds"] is None
+        assert bake["basis"] == "estimated"
+        assert d["has_unmeasured"] is True
+
+    def test_measured_stages_say_measured(self, client):
+        d = client.get("/api/stage-costs?bake=true&normal_res=1024&has_host=false").json()
+        bake = next(s for s in d["stages"] if s["key"] == "bake")
+        assert bake["basis"] == "measured"
+        assert bake["seconds"] == 13.6
+
+    def test_bake_location_reaches_the_pipeline(self, tmp_path, monkeypatch):
+        """Without a host, 'host' must resolve to local: the pipeline has no
+        executor to send it to and would otherwise bake locally while claiming
+        otherwise."""
+        import time
+
+        captured: dict = {}
+
+        def fake_call_build(**kwargs):
+            captured.update(kwargs)
+            from pixiecad.pipeline import BuildResult, Regime, StageOutcome
+
+            return BuildResult(
+                regime=Regime.SPARSE_VIEWS,
+                stages=[StageOutcome(name="ingest", status="ok", detail="", seconds=0.0)],
+                glb_path=None,
+                faces=None,
+                scale_applied=None,
+                warnings=[],
+            )
+
+        monkeypatch.setattr("pixiecad.web.app._call_build", fake_call_build)
+        client = TestClient(create_app(tmp_path))
+        client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(33), "image/jpeg"))],
+            data={"name": "loc", "bake_normals": "true", "bake_location": "host"},
+        )
+        deadline = time.time() + 10
+        while time.time() < deadline and not captured:
+            time.sleep(0.05)
+        assert captured.get("bake_location") == "local"

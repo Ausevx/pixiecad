@@ -94,6 +94,7 @@ def _run_generative(
     backend: str | None,
     bake: bool,
     normal_res: int,
+    bake_location: str = "local",
     split: bool = False,
     max_parts: int = 8,
     object_hint: str | None = None,
@@ -182,6 +183,8 @@ def _run_generative(
         warnings=warnings,
         bake=bake,
         normal_res=normal_res,
+        bake_location=bake_location,
+        executor=executor,
         split=split,
         max_parts=max_parts,
         object_hint=object_hint,
@@ -231,6 +234,7 @@ def run_build(
     dense: bool = True,
     bake: bool = True,
     normal_res: int = 1024,
+    bake_location: str = "local",
     generative_backend: str | None = None,
     split: bool = False,
     max_parts: int = 8,
@@ -318,6 +322,7 @@ def run_build(
             backend=generative_backend,
             bake=bake,
             normal_res=normal_res,
+            bake_location=bake_location,
             split=split,
             max_parts=max_parts,
             object_hint=object_hint,
@@ -476,6 +481,8 @@ def run_build(
         warnings=warnings,
         bake=bake,
         normal_res=normal_res,
+        bake_location=bake_location,
+        executor=executor,
         split=split,
         max_parts=max_parts,
         object_hint=object_hint,
@@ -493,6 +500,8 @@ def _mesh_tail(
     warnings: list[str],
     bake: bool,
     normal_res: int,
+    bake_location: str = "local",
+    executor: Executor | None = None,
     split: bool = False,
     max_parts: int = 8,
     object_hint: str | None = None,
@@ -630,7 +639,17 @@ def _mesh_tail(
     try:
         unwrap_res = unwrap_uv(mesh)
         mesh = unwrap_res.mesh
-        if bake:
+        if bake and bake_location == "host" and executor is not None:
+            # No local fallback on purpose: choosing the host is a statement
+            # about this machine's memory, so silently baking here anyway
+            # would defeat the point. A failure surfaces as a failed stage.
+            from .meshops.bake_remote import bake_object_space_normals_remote
+
+            normal_map = bake_object_space_normals_remote(
+                executor, dense_mesh, mesh, resolution=normal_res
+            )
+            detail = f"uv unwrapped, baked normal map on host ({normal_res}x{normal_res})"
+        elif bake:
             normal_map = bake_object_space_normals(dense_mesh, mesh, resolution=normal_res)
             detail = f"uv unwrapped, baked normal map ({normal_res}x{normal_res})"
         else:

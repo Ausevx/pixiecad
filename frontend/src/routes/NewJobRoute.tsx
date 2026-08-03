@@ -1,14 +1,20 @@
 import { motion } from "motion/react";
 import { useEffect, useState } from "react";
 import { PhotoDrop, type PhotoEntry } from "@/components/PhotoDrop";
-import { createJob, getBackends } from "@/lib/api";
+import { createJob, getBackends, getStageCosts } from "@/lib/api";
 import { useReducedMotion } from "@/lib/hooks";
 import { snap } from "@/lib/motion";
 import { refreshJobs } from "@/lib/jobs";
 import { go, useDrawer } from "@/lib/router";
 import { useVm } from "@/lib/vm";
 import { toast } from "@/shell/toast";
-import type { BackendOption, NewJobParams, ViewTag } from "@/lib/types";
+import type {
+  BackendOption,
+  NewJobParams,
+  StageCost,
+  StageCosts,
+  ViewTag,
+} from "@/lib/types";
 
 /* ─────────────────────────────────────────────────────────────────────────
    New job — one screen, one intent.
@@ -43,6 +49,108 @@ function Field({
 
 const inputClass =
   "rounded-sharp border border-rule bg-void px-2 py-1.5 font-mono text-[12px] text-ink placeholder:text-ink-faint";
+
+/** What this job will actually cost, split by where the work lands.
+ *
+ *  Local and host seconds are not interchangeable and are deliberately not
+ *  summed into one number: host time is billed but costs this machine nothing,
+ *  while local time and memory compete with whatever else the user is doing.
+ *  Peak local RAM gets its own line because that is the figure that decides
+ *  whether a background job is tolerable on a 16 GB laptop.
+ */
+function CostEstimate({
+  bake,
+  normalRes,
+  bakeLocation,
+  texture,
+  semantic,
+  hasHost,
+}: {
+  bake: boolean;
+  normalRes: number;
+  bakeLocation: string;
+  texture: boolean;
+  semantic: boolean;
+  hasHost: boolean;
+}) {
+  const [costs, setCosts] = useState<StageCosts | null>(null);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    getStageCosts(
+      {
+        bake,
+        normal_res: normalRes,
+        bake_location: bakeLocation,
+        texture,
+        semantic,
+        has_host: hasHost,
+      },
+      ac.signal,
+    )
+      .then(setCosts)
+      .catch(() => undefined);
+    return () => ac.abort();
+  }, [bake, normalRes, bakeLocation, texture, semantic, hasHost]);
+
+  if (!costs) return null;
+
+  const local = costs.stages.filter((s) => s.where === "local");
+  const host = costs.stages.filter((s) => s.where === "host");
+  const heavy = costs.local_peak_ram_mb >= 3000;
+
+  const row = (s: StageCost) => (
+    <div key={s.key} className="flex items-baseline justify-between gap-3 py-0.5">
+      <span className="font-mono text-[11px] text-ink-dim">
+        {s.label}
+        {s.basis === "estimated" && (
+          <span className="text-ink-faint"> (est.)</span>
+        )}
+      </span>
+      <span className="shrink-0 font-mono text-[11px] tabular-nums text-ink-faint">
+        {s.seconds === null ? "—" : `${s.seconds.toFixed(1)}s`}
+        {s.where === "local" && s.peak_ram_mb ? ` · ${(s.peak_ram_mb / 1024).toFixed(1)} GB` : ""}
+      </span>
+    </div>
+  );
+
+  return (
+    <div className="rounded-sharp border border-rule bg-panel/40 p-3">
+      <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-ink-faint">
+        estimated cost
+      </div>
+
+      <div className="mb-1 font-mono text-[10px] uppercase tracking-wider text-ink-faint">
+        on this machine
+      </div>
+      {local.map(row)}
+      <div className="mt-1 flex items-baseline justify-between gap-3 border-t border-rule pt-1">
+        <span className="font-mono text-[11px] text-ink-dim">peak memory</span>
+        <span
+          className={`font-mono text-[11px] tabular-nums ${heavy ? "text-warn" : "text-ink-dim"}`}
+        >
+          {(costs.local_peak_ram_mb / 1024).toFixed(1)} GB
+        </span>
+      </div>
+
+      {host.length > 0 && (
+        <>
+          <div className="mb-1 mt-3 font-mono text-[10px] uppercase tracking-wider text-ink-faint">
+            on the GPU host (billed, free to this machine)
+          </div>
+          {host.map(row)}
+        </>
+      )}
+
+      <p className="mt-2 font-mono text-[10px] leading-relaxed text-ink-faint">
+        Measured on this project against a 1.3M-face mesh, except where marked
+        (est.).
+        {costs.has_unmeasured &&
+          " Remote baking has no measured time yet — it has not run end to end."}
+      </p>
+    </div>
+  );
+}
 
 function Check({
   checked,
@@ -207,6 +315,8 @@ export function NewJobRoute() {
   const [textureSize, setTextureSize] = useState(1024);
   const [bakeNormals, setBakeNormals] = useState(true);
   const [normalRes, setNormalRes] = useState(1024);
+  const [bakeLocation, setBakeLocation] =
+    useState<"auto" | "local" | "host">("auto");
 
   const taggedCount = photos.filter((p) => p.tag).length;
   const needsGpu = texture || segmentation === "semantic";
@@ -247,6 +357,7 @@ export function NewJobRoute() {
       view_tags,
       bake_normals: bakeNormals,
       normal_res: normalRes,
+      bake_location: bakeLocation,
     };
 
     try {
@@ -428,13 +539,40 @@ export function NewJobRoute() {
                 checked={bakeNormals}
                 onChange={setBakeNormals}
                 label="bake normal map"
-                hint="Recovers surface detail from the full-resolution mesh as a texture instead of as polygons. Runs on this machine, not the GPU host — measured at 14s and ~3.4 GB for a 1.3M-face mesh."
+                hint="Records detail lost to decimation as a texture, so 20k triangles are lit like 1.3M. A rendering trick — it does nothing for 3D printing, which follows geometry."
               />
 
               {bakeNormals && (
                 <Field
+                  label="bake on"
+                  hint={
+                    bakeLocation === "local" || !vm.host
+                      ? "This machine. The bake is the heaviest local stage by a wide margin."
+                      : "The GPU host — which costs this machine only the ~12 MB upload. It is remote CPU, not GPU acceleration; the bake does no GPU work anywhere."
+                  }
+                >
+                  <select
+                    value={bakeLocation}
+                    onChange={(e) =>
+                      setBakeLocation(e.target.value as "auto" | "local" | "host")
+                    }
+                    className={inputClass}
+                  >
+                    <option value="auto">
+                      auto — host when one is running{vm.host ? "" : " (none now)"}
+                    </option>
+                    <option value="local">this machine</option>
+                    <option value="host" disabled={!vm.host}>
+                      GPU host{vm.host ? "" : " — needs a host"}
+                    </option>
+                  </select>
+                </Field>
+              )}
+
+              {bakeNormals && (
+                <Field
                   label="normal map resolution"
-                  hint="Measured on a 1.3M-face mesh: 1024 takes 14s and ~3.4 GB, 2048 takes 53s and ~4.1 GB. Capped at 2048 — this runs alongside everything else on your machine."
+                  hint="Higher is sharper. The cost of each choice is in the estimate below."
                 >
                   <select
                     value={normalRes}
@@ -471,6 +609,15 @@ export function NewJobRoute() {
               </Field>
             </div>
           )}
+
+          <CostEstimate
+            bake={bakeNormals}
+            normalRes={normalRes}
+            bakeLocation={bakeLocation}
+            texture={texture}
+            semantic={segmentation === "semantic"}
+            hasHost={Boolean(vm.host)}
+          />
 
           <motion.button
             type="submit"

@@ -249,4 +249,29 @@ export interface NewJobParams {
   bake_normals: boolean;
   /** Resolution of the baked normal map. Clamped server-side to [256, 2048]. */
   normal_res: number;
+  /** Where the bake runs. "auto" resolves to the host when one is configured. */
+  bake_location: "auto" | "local" | "host";
+}
+
+/** GET /api/stage-costs — what a job as configured will actually cost.
+ *
+ *  `basis` matters as much as the number: a measured figure and an estimate
+ *  rendered identically would make a 16 GB machine's resource decision worse
+ *  than showing nothing at all. */
+export interface StageCost {
+  key: string;
+  label: string;
+  where: "local" | "host";
+  seconds: number | null;
+  peak_ram_mb: number | null;
+  basis: "measured" | "estimated";
+  detail: string;
+}
+
+export interface StageCosts {
+  stages: StageCost[];
+  local_peak_ram_mb: number;
+  total_known_seconds: number;
+  has_unmeasured: boolean;
+  bake_location_resolved: "local" | "host" | null;
 }

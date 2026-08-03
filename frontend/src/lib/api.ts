@@ -9,6 +9,7 @@ import type {
   JobSummary,
   NewJobParams,
   ProvisionState,
+  StageCosts,
   VmStatus,
 } from "./types";
 
@@ -210,3 +211,24 @@ export function formatSeconds(s: number): string {
 }
 
 export const formatCount = (n: number) => n.toLocaleString("en-US");
+
+/** What the job as currently configured will cost, before submitting it.
+ *  Static server-side arithmetic over measured constants, so it is cheap to
+ *  re-fetch on every form change. */
+export const getStageCosts = (
+  q: {
+    bake: boolean;
+    normal_res: number;
+    bake_location: string;
+    texture: boolean;
+    semantic: boolean;
+    has_host: boolean;
+  },
+  signal?: AbortSignal,
+) =>
+  request<StageCosts>(
+    `/api/stage-costs?${new URLSearchParams(
+      Object.entries(q).map(([k, v]) => [k, String(v)]),
+    ).toString()}`,
+    { signal },
+  );
