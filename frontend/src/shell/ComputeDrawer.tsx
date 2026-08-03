@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   formatSeconds,
   getGpuOptions,
+  getCloud,
   getInventory,
   getProvisionState,
   provision,
@@ -12,7 +13,12 @@ import { usePoll, useReducedMotion } from "@/lib/hooks";
 import { drawerVariants, fade, settle, signatures, snap } from "@/lib/motion";
 import { expectTeardown, refreshVm, useVm } from "@/lib/vm";
 import { toast } from "./toast";
-import type { CloudInventory, GpuOption, ProvisionState } from "@/lib/types";
+import type {
+  CloudInventory,
+  CloudSnapshot,
+  GpuOption,
+  ProvisionState,
+} from "@/lib/types";
 
 /* ─────────────────────────────────────────────────────────────────────────
    Compute.
@@ -88,6 +94,100 @@ function GpuChooser({
           <p className="pt-1 leading-relaxed text-ink-faint">{selected.speed_basis}.</p>
           <p className="leading-relaxed text-ink-faint">{selected.note}</p>
         </dl>
+      )}
+    </>
+  );
+}
+
+/** Account, project, and every instance — not just the running one.
+ *
+ *  This is the old dashboard's "Google Cloud Status" card. It answers two
+ *  questions the cheap VM poll cannot: which account and project is this
+ *  actually billing, and is there a stopped instance still holding a disk I
+ *  am paying for. Fetched only while the drawer is open, because it is the
+ *  slower of the two cloud endpoints. */
+function CloudIdentity() {
+  const [snap, setSnap] = useState<CloudSnapshot | null>(null);
+
+  usePoll(async (signal) => setSnap(await getCloud(signal)), { interval: 20000 });
+
+  if (!snap) return <p className="font-mono text-[11px] text-ink-faint">checking…</p>;
+
+  if (!snap.available || !snap.gcloud?.installed) {
+    return (
+      <p className="font-mono text-[11px] leading-relaxed text-warn">
+        {snap.reason ?? "gcloud is not installed — cloud features are unavailable."}
+      </p>
+    );
+  }
+
+  const g = snap.gcloud;
+  const instances = snap.instances ?? [];
+
+  return (
+    <>
+      <dl className="space-y-0.5 font-mono text-[11px] text-ink-faint">
+        {[
+          ["account", g.account],
+          ["project", g.project],
+          ["gcloud", g.version],
+        ].map(([k, v]) => (
+          <div key={String(k)} className="flex justify-between gap-3">
+            <dt>{k}</dt>
+            <dd className="truncate text-ink-dim" title={String(v ?? "")}>
+              {v || "—"}
+            </dd>
+          </div>
+        ))}
+      </dl>
+
+      <h4 className="mt-3 mb-1 font-mono text-[10px] uppercase tracking-widest text-ink-faint">
+        Instances ({instances.length})
+      </h4>
+      {instances.length === 0 ? (
+        <p className="font-mono text-[11px] text-ok">No compute instances.</p>
+      ) : (
+        <ul className="list-none space-y-1.5">
+          {instances.map((i) => {
+            const running = i.status.toUpperCase() === "RUNNING";
+            return (
+              <li key={`${i.zone}-${i.name}`} className="border-b border-rule pb-1.5">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="truncate font-mono text-[11px] text-ink">{i.name}</span>
+                  <span
+                    className={`shrink-0 font-mono text-[10px] uppercase ${
+                      running ? "text-ok" : "text-ink-faint"
+                    }`}
+                  >
+                    {i.status}
+                  </span>
+                </div>
+                <p className="font-mono text-[10px] tabular-nums text-ink-faint">
+                  {i.machine_type} · {i.zone}
+                  {i.accelerator ? ` · ${i.accelerator}` : ""}
+                  {i.preemptible ? " · spot" : ""}
+                  {i.uptime_hours != null ? ` · ${i.uptime_hours.toFixed(1)}h` : ""}
+                  {i.estimated_cost_usd
+                    ? ` · $${i.estimated_cost_usd.toFixed(2)}`
+                    : ""}
+                </p>
+                {/* A stopped instance still bills for its disk, which is
+                    exactly the cost people forget they are carrying. */}
+                {!running && (
+                  <p className="font-mono text-[10px] text-warn">
+                    stopped — its disk is still billed
+                  </p>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {snap.total_estimated_cost_usd != null && (
+        <p className="mt-2 font-mono text-[11px] tabular-nums text-ink-dim">
+          session estimate ${snap.total_estimated_cost_usd.toFixed(2)}
+        </p>
       )}
     </>
   );
@@ -385,6 +485,10 @@ function DrawerBody() {
         <p className="mt-2 font-mono text-[10px] leading-relaxed text-ink-faint">
           Billing continues until this succeeds.
         </p>
+      </Section>
+
+      <Section title="Account">
+        <CloudIdentity />
       </Section>
 
       <Section title="Billable resources">

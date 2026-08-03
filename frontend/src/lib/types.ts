@@ -146,6 +146,40 @@ export interface GpuOption {
   cold: GpuTiming;
 }
 
+/** GET /api/cloud — the richer, slower cloud snapshot.
+ *
+ *  Distinct from /api/cloud/vm, which is the cheap poll behind the header
+ *  pill. This one carries the account you are signed in as, the project being
+ *  billed, and EVERY instance rather than only the running one — which is how
+ *  you notice a stopped VM still holding a disk you are paying for. */
+export interface CloudInstance {
+  name: string;
+  zone: string;
+  machine_type: string;
+  status: string;
+  accelerator: string | null;
+  preemptible: boolean;
+  uptime_hours: number | null;
+  estimated_cost_usd: number | null;
+}
+
+export interface CloudSnapshot {
+  available: boolean;
+  reason?: string;
+  gcloud?: {
+    installed: boolean;
+    version: string | null;
+    account: string | null;
+    project: string | null;
+    billing_enabled?: boolean;
+  };
+  instances?: CloudInstance[];
+  total_estimated_cost_usd?: number;
+  console_billing_url?: string;
+  checked_at?: string;
+  has_running_gpu?: boolean;
+}
+
 /** GET /api/cloud/inventory */
 export interface BillableResource {
   name: string;

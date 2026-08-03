@@ -1,5 +1,6 @@
 import type {
   CloudInventory,
+  CloudSnapshot,
   ConvertResult,
   GpuOption,
   JobDetail,
@@ -176,6 +177,12 @@ export const getGpuOptions = (texture = true, semantic = true, signal?: AbortSig
     `/api/gpu-options?texture=${texture}&semantic=${semantic}`,
     { signal },
   );
+
+/** The full cloud snapshot: who you are signed in as, which project is being
+ *  billed, and every instance rather than only the running one. Slower than
+ *  /api/cloud/vm, so it is only fetched while the compute drawer is open. */
+export const getCloud = (signal?: AbortSignal) =>
+  request<CloudSnapshot>("/api/cloud", { signal });
 
 /** Deliberately manual, never polled: each call shells out to gcloud several
  *  times and takes seconds. */
