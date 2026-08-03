@@ -102,6 +102,10 @@ def _gcp_project() -> str:
         return ""
 
 
+# The only tags the generative backend understands.
+VIEW_TAG_CHOICES = ("front", "back", "left", "right")
+
+
 class ConvertRequest(BaseModel):
     """GLB -> STL/OBJ/PLY for CAD and slicers."""
 
@@ -227,6 +231,7 @@ def create_app(root: Path) -> FastAPI:
         object_hint: str | None = None,
         finish: FinishOptions | None = None,
         generative_options: dict[str, Any] | None = None,
+        multiview: bool = False,
     ) -> None:
         with lock:
             job = jobs.get(job_id)
@@ -239,6 +244,9 @@ def create_app(root: Path) -> FastAPI:
         try:
             photos_dir = ws_root / "input"
             ws_dir = ws_root / "work" / "ws"
+            # The backend reads this at generate time; set per job rather than
+            # at import so two jobs cannot disagree about it.
+            os.environ["PIXIECAD_HUNYUAN_MULTIVIEW"] = "1" if multiview else "0"
 
             # The GPU host is what makes a real generative backend exist at
             # all: run_build registers hunyuan-remote only when it is handed
@@ -436,6 +444,8 @@ def create_app(root: Path) -> FastAPI:
         max_parts: int = Form(8),
         gpu_host: str | None = Form(None),
         octree_resolution: int = Form(256),
+        view_tags: str | None = Form(None),
+        multiview: bool = Form(False),
     ):
         # One session folder per upload: input/, work/ and output/ are never
         # shared between jobs, so two people uploading at once cannot read or
@@ -445,9 +455,34 @@ def create_app(root: Path) -> FastAPI:
         job_dir = session.root
         photos_dir = session.input_dir
 
+        # View tags are applied by *renaming* on the way in. The generative
+        # backend maps photos to front/back/left/right by filename, and ingest
+        # preserves the stem into its working copy, so a file saved as
+        # "front.jpg" is picked up as the front view with no other plumbing.
+        # That is what lets an arbitrary "WhatsApp Image ....jpeg" participate
+        # in multi-view at all -- unrenamed, it maps to nothing and the run
+        # silently falls back to a single view.
+        try:
+            tags = json.loads(view_tags) if view_tags else {}
+        except json.JSONDecodeError:
+            tags = {}
+        if not isinstance(tags, dict):
+            tags = {}
+
+        used_tags: set[str] = set()
         for f in files:
             fname = f.filename or f"photo_{uuid4().hex[:4]}.jpg"
-            dest = photos_dir / Path(fname).name
+            tag = str(tags.get(fname, "") or "").strip().lower()
+            if tag in VIEW_TAG_CHOICES and tag not in used_tags:
+                used_tags.add(tag)
+                stem = tag
+            else:
+                stem = Path(fname).stem
+            dest = photos_dir / f"{stem}{Path(fname).suffix or '.jpg'}"
+            n = 2
+            while dest.exists():
+                dest = photos_dir / f"{stem}-{n}{Path(fname).suffix or '.jpg'}"
+                n += 1
             with dest.open("wb") as buffer:
                 shutil.copyfileobj(f.file, buffer)
 
@@ -480,6 +515,9 @@ def create_app(root: Path) -> FastAPI:
         # is independent of the polygon budget, which only controls how the
         # result is simplified afterwards.
         gen_options = {"octree_resolution": max(64, octree_resolution)}
+        # Needs at least two tagged cardinal views to mean anything; below
+        # that the backend falls back to single-view regardless.
+        use_multiview = multiview and len(used_tags) >= 2
 
         session.write_meta(job_id=job_id, name=spec.name, target_faces=target_faces)
 
@@ -519,7 +557,7 @@ def create_app(root: Path) -> FastAPI:
         thread = threading.Thread(
             target=_job_worker,
             args=(job_id, job_dir, target_faces, backend_val, split, hint_val, finish,
-                  gen_options),
+                  gen_options, use_multiview),
             daemon=True,
         )
         thread.start()
@@ -891,6 +929,23 @@ def create_app(root: Path) -> FastAPI:
                 status="running", gpu=req.gpu, name=req.name, zone=req.zone, log=[]
             )
 
+        state_file = root / ".provision.json"
+
+        def _persist() -> None:
+            """Mirror provisioning state to disk.
+
+            The in-memory record dies with the process; the VM and its build
+            do not. Persisting means a restarted dashboard can still tell you
+            what is happening instead of showing "no VM" while one builds.
+            """
+            try:
+                with lock:
+                    snapshot = dict(provisioning)
+                snapshot["log"] = snapshot.get("log", [])[-40:]
+                state_file.write_text(json.dumps(snapshot))
+            except Exception:
+                pass
+
         def _run() -> None:
             scripts = Path(__file__).resolve().parents[3] / "scripts"
             steps = [
@@ -905,13 +960,23 @@ def create_app(root: Path) -> FastAPI:
                 for step in steps:
                     with lock:
                         provisioning["log"].append(f"$ {Path(step[0]).name} {' '.join(step[1:])}")
-                    proc = subprocess.run(step, capture_output=True, text=True, timeout=3600)
+                    _persist()
+                    # start_new_session detaches the child into its own
+                    # process group. Without it, Ctrl-C or closing the
+                    # terminal sends SIGINT/SIGHUP to the whole group and
+                    # kills a 30-minute image build half-way, leaving a VM
+                    # with some images missing and no sign of it.
+                    proc = subprocess.run(
+                        step, capture_output=True, text=True, timeout=3600,
+                        start_new_session=True,
+                    )
                     with lock:
                         provisioning["log"].extend((proc.stdout or "").splitlines()[-15:])
                     if proc.returncode != 0:
                         with lock:
                             provisioning["log"].extend((proc.stderr or "").splitlines()[-15:])
                             provisioning["status"] = "failed"
+                        _persist()
                         return
                 # The alias the executor needs; without config-ssh the host
                 # name does not resolve at all.
@@ -929,10 +994,12 @@ def create_app(root: Path) -> FastAPI:
                             "WARNING: could not determine GCP project; set "
                             "PIXIECAD_GCP_PROJECT or run 'gcloud config set project'"
                         )
+                _persist()
             except Exception as exc:
                 with lock:
                     provisioning["status"] = "failed"
                     provisioning["log"].append(str(exc))
+                _persist()
 
         threading.Thread(target=_run, daemon=True).start()
         return {"status": "running"}
@@ -940,7 +1007,18 @@ def create_app(root: Path) -> FastAPI:
     @app.get("/api/cloud/provision")
     def provision_status():
         with lock:
-            return dict(provisioning)
+            current = dict(provisioning)
+        if current:
+            return current
+        # Nothing in memory: a restart may have lost the record while the
+        # detached build carries on, so fall back to the file it writes.
+        state_file = root / ".provision.json"
+        if state_file.is_file():
+            try:
+                return json.loads(state_file.read_text())
+            except Exception:
+                pass
+        return {}
 
     @app.post("/api/cloud/teardown")
     def teardown(req: TeardownRequest):

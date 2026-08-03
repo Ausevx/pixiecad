@@ -460,3 +460,84 @@ class TestVmStatus:
         d = client.get("/api/cloud/vm").json()
         if d.get("available"):
             assert "building" in d and "running" in d
+
+
+class TestViewTagging:
+    def test_tags_rename_uploads_so_view_mapping_works(self, client, tmp_path: Path):
+        """A camera-roll filename maps to no view; tagging must fix that."""
+        import io
+        import json as _json
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (800, 800), (120, 120, 120)).save(buf, format="JPEG")
+        raw = buf.getvalue()
+        files = [
+            ("files", ("WhatsApp Image 2026-08-03 at 05.16.50.jpeg", raw, "image/jpeg")),
+            ("files", ("WhatsApp Image 2026-08-03 at 05.16.51.jpeg", raw, "image/jpeg")),
+        ]
+        tags = {
+            "WhatsApp Image 2026-08-03 at 05.16.50.jpeg": "front",
+            "WhatsApp Image 2026-08-03 at 05.16.51.jpeg": "left",
+        }
+        r = client.post(
+            "/api/jobs",
+            data={"name": "tagged", "backend": "fake", "view_tags": _json.dumps(tags),
+                  "multiview": "true", "split": "false"},
+            files=files,
+        )
+        assert r.status_code == 200
+        job_id = r.json()["job_id"]
+        job = client.get(f"/api/jobs/{job_id}").json()
+        names = sorted(p.name for p in (Path(job["dir"]) / "input").iterdir())
+        assert names == ["front.jpeg", "left.jpeg"], names
+
+    def test_untagged_uploads_keep_their_names(self, client):
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (800, 800), (90, 90, 90)).save(buf, format="JPEG")
+        r = client.post(
+            "/api/jobs",
+            data={"name": "untagged", "backend": "fake", "split": "false"},
+            files=[("files", ("holiday snap.jpeg", buf.getvalue(), "image/jpeg"))],
+        )
+        job = client.get(f"/api/jobs/{r.json()['job_id']}").json()
+        assert [p.name for p in (Path(job["dir"]) / "input").iterdir()] == ["holiday snap.jpeg"]
+
+    def test_duplicate_tag_does_not_overwrite(self, client):
+        """Two photos tagged 'front' must not collide into one file."""
+        import io
+        import json as _json
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (800, 800), (70, 70, 70)).save(buf, format="JPEG")
+        raw = buf.getvalue()
+        r = client.post(
+            "/api/jobs",
+            data={"name": "dupe", "backend": "fake", "split": "false",
+                  "view_tags": _json.dumps({"a.jpeg": "front", "b.jpeg": "front"})},
+            files=[("files", ("a.jpeg", raw, "image/jpeg")),
+                   ("files", ("b.jpeg", raw, "image/jpeg"))],
+        )
+        job = client.get(f"/api/jobs/{r.json()['job_id']}").json()
+        assert len(list((Path(job["dir"]) / "input").iterdir())) == 2
+
+    def test_malformed_view_tags_are_ignored(self, client):
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (800, 800), (60, 60, 60)).save(buf, format="JPEG")
+        r = client.post(
+            "/api/jobs",
+            data={"name": "bad", "backend": "fake", "split": "false", "view_tags": "not json"},
+            files=[("files", ("x.jpeg", buf.getvalue(), "image/jpeg"))],
+        )
+        assert r.status_code == 200
