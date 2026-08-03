@@ -412,6 +412,23 @@ def create_app(root: Path) -> FastAPI:
                 }
                 for s in getattr(result, "stages", []) or []
             ]
+            # Published the moment the build reports, NOT at the end of the
+            # job. Finishing -- smoothing, texturing on the GPU, segmentation
+            # -- runs for minutes after this point, and holding the stage list
+            # until then left the dashboard with nothing to show for the whole
+            # of it. The summary lines are published here for the same reason:
+            # they describe work that is already finished.
+            with lock:
+                current = jobs.get(job_id)
+                if current:
+                    current["stages"] = stage_outcomes
+                    for line in (
+                        result.summary_lines() if hasattr(result, "summary_lines") else []
+                    ):
+                        current["log"].append(line)
+                    for line in _ingest_rejections(ws_root):
+                        current["log"].append(line)
+
             glb_path = getattr(result, "glb_path", None)
             faces = getattr(result, "faces", None)
             parts_raw = getattr(result, "parts", None)
@@ -503,18 +520,11 @@ def create_app(root: Path) -> FastAPI:
                         if web_model.exists():
                             current["web_url"] = f"/api/jobs/{job_id}/model_web.glb"
 
-            summary_lines = result.summary_lines() if hasattr(result, "summary_lines") else []
-
+            # The build's own summary and the per-photo ingest rejections were
+            # already logged the moment the build reported, above.
             with lock:
                 job = jobs.get(job_id)
                 if job:
-                    for line in summary_lines:
-                        job["log"].append(line)
-                    # Always, not only on failure: a photo silently dropped
-                    # from an otherwise successful run degrades the result and
-                    # the user should see which one and why.
-                    for line in _ingest_rejections(ws_root):
-                        job["log"].append(line)
                     for w in warnings:
                         job["log"].append(f"WARNING: {w}")
 

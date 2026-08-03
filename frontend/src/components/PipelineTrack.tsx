@@ -89,14 +89,22 @@ function buildCells(job: JobDetail): Cell[] {
     }));
   }
 
-  // Nothing reported yet. Show the canonical shape so the track does not pop
-  // into existence when the job finishes, and mark exactly one lane as in
-  // progress rather than lighting up everything that has not run.
-  const running = job.status === "running";
-  return ORDER.map((name, i): Cell => ({
+  // Nothing reported yet.
+  //
+  // run_build accumulates its stages in a local list and only returns them
+  // when the whole build is done, so there is genuinely no per-stage signal
+  // while it runs. An earlier version filled that gap by marking the FIRST
+  // lane running — which meant the track sat on "ingest" for the entire job,
+  // including minutes of GPU texturing. That is not a cosmetic problem: it
+  // states something false about where the work is.
+  //
+  // So no lane is marked running. The track shows the shape that is coming,
+  // greyed, and the coarse phase is reported separately by the caller from
+  // job.stage, which IS live.
+  return ORDER.map((name): Cell => ({
     key: name,
     label: LABEL[name] ?? name,
-    state: running && i === 0 ? "running" : job.status === "failed" ? "skipped" : "pending",
+    state: job.status === "failed" ? "skipped" : "pending",
     seconds: null,
     detail: "",
   }));
@@ -151,9 +159,28 @@ function StageCell({ cell }: { cell: Cell }) {
   );
 }
 
+/** What the server is actually doing right now, as opposed to which stages
+ *  have finished. These are the only phases the worker reports live, and
+ *  saying exactly this much is better than implying per-stage precision the
+ *  pipeline does not emit while it runs. */
+const PHASE: Record<string, string> = {
+  queued: "queued",
+  "waiting for GPU": "waiting for a GPU VM",
+  build: "building — ingest through export, on the GPU",
+  finishing: "finishing — smoothing, texturing, segmentation",
+  clean: "cleaning mesh",
+  decimate: "decimating",
+  unwrap: "unwrapping UVs",
+  bake: "baking normals",
+  export: "exporting",
+};
+
 export function PipelineTrack({ job }: { job: JobDetail }) {
   const cells = buildCells(job);
   const total = (job.stages ?? []).reduce((sum, s) => sum + s.seconds, 0);
+  const reduced = useReducedMotion();
+  const live = job.status === "running" || job.status === "queued";
+  const phase = PHASE[job.stage] ?? job.stage;
 
   // The whole track is one screen-reader sentence. Ten separate cells each
   // announcing "ingest 0.41 seconds" is unusable; the summary is what a
@@ -179,6 +206,26 @@ export function PipelineTrack({ job }: { job: JobDetail }) {
       </div>
 
       <p className="sr-only">{spoken}</p>
+
+      {/* The live phase. Shown whenever the job is still moving, because the
+          per-stage track below cannot update until the build reports. */}
+      {live && (
+        <div className="mb-2 flex items-center gap-2 rounded-panel border border-accent-dim bg-accent-wash px-3 py-1.5">
+          <motion.span
+            aria-hidden="true"
+            animate={reduced ? undefined : signatures.running}
+            className="text-[11px] text-accent"
+          >
+            ◐
+          </motion.span>
+          <span className="font-mono text-[11px] text-accent">{phase}</span>
+          {cells.every((c) => c.seconds === null) && (
+            <span className="ml-auto font-mono text-[10px] text-ink-faint">
+              per-stage timings arrive when the build reports
+            </span>
+          )}
+        </div>
+      )}
 
       <ul aria-hidden="true" className="flex list-none gap-1 overflow-x-auto pb-1">
         {cells.map((c) => (

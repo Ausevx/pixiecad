@@ -880,3 +880,78 @@ class TestQueuedGate:
         src = inspect.getsource(m.create_app)
         assert "GPU provisioning failed" in src
         assert "Gave up waiting for the GPU VM" in src
+
+
+class TestStagesPublishedEarly:
+    """Stage data must appear when the BUILD reports, not when the JOB ends.
+
+    Finishing -- smoothing, texturing on the GPU, segmentation -- runs for
+    minutes after run_build returns. Holding the stage list until the very end
+    left the dashboard with nothing to show for the whole of it, and the
+    pipeline view sat on its first lane while the job was actually texturing.
+    """
+
+    def test_stages_are_published_before_finishing_runs(self, tmp_path, monkeypatch):
+        import threading
+
+        import pixiecad.web.finishing as fin_mod
+
+        # Block inside finishing and inspect the job record from the outside:
+        # if stages are only assigned after finish_model returns, they are
+        # still empty at this point.
+        entered = threading.Event()
+        release = threading.Event()
+        real_finish = fin_mod.finish_model
+
+        def blocking_finish(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=30)
+            return real_finish(*args, **kwargs)
+
+        monkeypatch.setattr("pixiecad.web.app.finish_model", blocking_finish)
+
+        client = TestClient(create_app(tmp_path))
+        res = client.post(
+            "/api/jobs",
+            files=[
+                ("files", ("a.jpg", _generate_test_jpeg(11), "image/jpeg")),
+                ("files", ("b.jpg", _generate_test_jpeg(12), "image/jpeg")),
+            ],
+            data={"name": "early", "backend": "fake", "smooth_iterations": "1"},
+        )
+        job_id = res.json()["job_id"]
+
+        assert entered.wait(timeout=30), "finishing never started"
+        try:
+            mid = client.get(f"/api/jobs/{job_id}").json()
+            assert mid["status"] == "running"
+            assert len(mid["stages"]) > 0, (
+                "stage timings must be visible while finishing is still running"
+            )
+            assert any(s["name"] == "ingest" for s in mid["stages"])
+            # The build's own summary is logged at the same moment, so the log
+            # is not silent for the whole of finishing either.
+            assert any("[OK] ingest" in line for line in mid["log"])
+        finally:
+            release.set()
+
+    def test_summary_lines_are_not_logged_twice(self, tmp_path):
+        import time
+
+        client = TestClient(create_app(tmp_path))
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(13), "image/jpeg"))],
+            data={"name": "once", "backend": "fake"},
+        )
+        job_id = res.json()["job_id"]
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            job = client.get(f"/api/jobs/{job_id}").json()
+            if job["status"] in ("done", "failed"):
+                break
+            time.sleep(0.1)
+
+        ingest_lines = [ln for ln in job["log"] if ln.startswith("[OK] ingest")]
+        assert len(ingest_lines) == 1, f"logged {len(ingest_lines)} times: {ingest_lines}"
