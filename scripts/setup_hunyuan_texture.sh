@@ -55,6 +55,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # dependency that was dropped from the shape image, which is why texture needs
 # its own layer.
 RUN pip install --no-cache-dir "bpy==4.2.0"
+# The paint pipeline remeshes before it paints, and its remesher calls
+# trimesh.simplify_quadric_decimation, which since trimesh 4.x is a thin
+# wrapper around fast_simplification rather than the old built-in. Without it
+# the whole texture stage dies with ModuleNotFoundError AFTER the model has
+# loaded -- about 15 s of GPU time and a fully generated mesh wasted, and the
+# job completes untextured with only a warning to show for it.
+RUN pip install --no-cache-dir fast_simplification \
+ && python -c "import fast_simplification; print('fast_simplification import OK')"
 # realesrgan pulls basicsr, which imports torchvision.transforms.functional_tensor
 # -- removed from torchvision years ago, so the import dies on any current
 # version. Installing without deps and patching the import is the accepted fix;

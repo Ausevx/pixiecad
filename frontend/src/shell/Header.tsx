@@ -1,5 +1,6 @@
 import { motion } from "motion/react";
-import { Wordmark } from "./Wordmark";
+import { Logo } from "./Logo";
+import { ThemeToggle } from "./ThemeToggle";
 import { VmPill } from "./VmPill";
 import { href, useRoute, type Route } from "@/lib/router";
 import { snap } from "@/lib/motion";
@@ -49,7 +50,7 @@ export function Header({ onOpenCompute }: { onOpenCompute: () => void }) {
           className="shrink-0"
           aria-label="PixieCAD, go to jobs"
         >
-          <Wordmark />
+          <Logo />
         </a>
 
         <nav aria-label="Main" className="flex items-center gap-1">
@@ -75,6 +76,7 @@ export function Header({ onOpenCompute }: { onOpenCompute: () => void }) {
           + new job
         </motion.a>
 
+        <ThemeToggle />
         <VmPill onOpen={onOpenCompute} />
       </div>
     </header>

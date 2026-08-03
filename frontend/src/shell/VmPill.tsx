@@ -32,17 +32,17 @@ const PRESENTATION: Record<
   building: {
     glyph: "◐",
     label: "building images",
-    className: "bg-[#231a06] border-[#4a3a10] text-warn",
+    className: "bg-warn-wash border-warn-edge text-warn",
   },
   ready: {
     glyph: "●",
     label: "GPU ready",
-    className: "bg-[#0a1d12] border-[#17452b] text-ok",
+    className: "bg-ok-wash border-ok-edge text-ok",
   },
   preempted: {
     glyph: "▲",
     label: "preempted",
-    className: "bg-[#2a0d0d] border-[#5c1d1d] text-fail",
+    className: "bg-fail-wash border-fail-edge text-fail",
   },
 };
 

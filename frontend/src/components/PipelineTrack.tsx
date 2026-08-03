@@ -53,8 +53,8 @@ const LABEL: Record<string, string> = {
 type State = "ok" | "failed" | "skipped" | "running" | "pending";
 
 const STYLE: Record<State, string> = {
-  ok: "border-[#17452b] bg-[#0a1d12] text-ok",
-  failed: "border-[#5c1d1d] bg-[#2a0d0d] text-fail",
+  ok: "border-ok-edge bg-ok-wash text-ok",
+  failed: "border-fail-edge bg-fail-wash text-fail",
   skipped: "border-rule bg-panel text-ink-faint",
   running: "border-accent-dim bg-accent-wash text-accent",
   pending: "border-rule bg-transparent text-ink-faint opacity-50",

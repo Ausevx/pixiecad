@@ -26,8 +26,8 @@ import { toast } from "@/shell/toast";
 const STATUS_STYLE: Record<JobStatus, string> = {
   queued: "border-rule bg-panel text-ink-dim",
   running: "border-accent-dim bg-accent-wash text-accent",
-  done: "border-[#17452b] bg-[#0a1d12] text-ok",
-  failed: "border-[#5c1d1d] bg-[#2a0d0d] text-fail",
+  done: "border-ok-edge bg-ok-wash text-ok",
+  failed: "border-fail-edge bg-fail-wash text-fail",
 };
 
 function DeleteJob({ jobId, running }: { jobId: string; running: boolean }) {
@@ -56,7 +56,7 @@ function DeleteJob({ jobId, running }: { jobId: string; running: boolean }) {
         type="button"
         disabled={busy}
         onClick={() => void remove()}
-        className="rounded-sharp border border-[#5c1d1d] bg-[#2a0d0d] px-2 py-1 font-mono text-[10px] uppercase tracking-widest text-fail hover:bg-fail hover:text-void disabled:opacity-50"
+        className="rounded-sharp border border-fail-edge bg-fail-wash px-2 py-1 font-mono text-[10px] uppercase tracking-widest text-fail hover:bg-fail hover:text-void disabled:opacity-50"
       >
         {busy ? "…" : "yes"}
       </button>
@@ -72,7 +72,7 @@ function DeleteJob({ jobId, running }: { jobId: string; running: boolean }) {
     <button
       type="button"
       onClick={() => setConfirming(true)}
-      className="rounded-sharp border border-rule px-2 py-1 font-mono text-[10px] uppercase tracking-widest text-ink-faint hover:border-[#5c1d1d] hover:text-fail"
+      className="rounded-sharp border border-rule px-2 py-1 font-mono text-[10px] uppercase tracking-widest text-ink-faint hover:border-fail-edge hover:text-fail"
     >
       delete
     </button>
@@ -113,7 +113,7 @@ function Reoptimise({ jobId, faces }: { jobId: string; faces: number }) {
           step={500}
           value={target}
           onChange={(e) => setTarget(Number(e.target.value))}
-          className="accent-[#ffb230]"
+          className="accent-accent"
         />
       </label>
       <button
@@ -190,7 +190,7 @@ export function JobDetailRoute({ jobId }: { jobId: string }) {
       </div>
 
       {error && (
-        <p className="mt-4 rounded-panel border border-[#5c1d1d] bg-[#2a0d0d] px-3 py-2 font-mono text-[12px] text-fail">
+        <p className="mt-4 rounded-panel border border-fail-edge bg-fail-wash px-3 py-2 font-mono text-[12px] text-fail">
           {error}
         </p>
       )}
@@ -205,7 +205,7 @@ export function JobDetailRoute({ jobId }: { jobId: string }) {
           <Artifacts job={job} files={files} onChanged={() => undefined} />
 
           {job.warnings.length > 0 && (
-            <ul className="list-none space-y-1 rounded-panel border border-[#4a3a10] bg-[#231a06] p-3">
+            <ul className="list-none space-y-1 rounded-panel border border-warn-edge bg-warn-wash p-3">
               {job.warnings.map((w) => (
                 <li key={w} className="font-mono text-[11px] leading-relaxed text-warn">
                   ⚠ {w}

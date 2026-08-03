@@ -453,7 +453,7 @@ function DrawerBody() {
                 <button
                   type="button"
                   onClick={() => void destroy()}
-                  className="flex-1 rounded-sharp border border-[#5c1d1d] bg-[#2a0d0d] px-3 py-1.5 font-mono text-[11px] uppercase tracking-widest text-fail hover:bg-fail hover:text-void"
+                  className="flex-1 rounded-sharp border border-fail-edge bg-fail-wash px-3 py-1.5 font-mono text-[11px] uppercase tracking-widest text-fail hover:bg-fail hover:text-void"
                 >
                   delete it
                 </button>
@@ -476,7 +476,7 @@ function DrawerBody() {
               transition={fade}
               onClick={() => setConfirmingTeardown(true)}
               disabled={vm.presence !== "ready"}
-              className="w-full rounded-sharp border border-rule-bright px-3 py-1.5 font-mono text-[11px] uppercase tracking-widest text-ink-dim hover:border-[#5c1d1d] hover:text-fail disabled:opacity-40"
+              className="w-full rounded-sharp border border-rule-bright px-3 py-1.5 font-mono text-[11px] uppercase tracking-widest text-ink-dim hover:border-fail-edge hover:text-fail disabled:opacity-40"
             >
               delete VM
             </motion.button>

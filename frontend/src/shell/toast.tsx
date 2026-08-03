@@ -48,9 +48,9 @@ export function dismissToast(id: number): void {
 
 const TONE: Record<ToastTone, string> = {
   info: "border-rule-bright bg-raised text-ink",
-  ok: "border-[#17452b] bg-[#0a1d12] text-ok",
-  warn: "border-[#4a3a10] bg-[#231a06] text-warn",
-  fail: "border-[#5c1d1d] bg-[#2a0d0d] text-fail",
+  ok: "border-ok-edge bg-ok-wash text-ok",
+  warn: "border-warn-edge bg-warn-wash text-warn",
+  fail: "border-fail-edge bg-fail-wash text-fail",
 };
 
 function ToastCard({ t }: { t: Toast }) {

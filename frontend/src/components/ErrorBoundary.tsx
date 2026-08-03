@@ -51,7 +51,7 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.props.fallback) return this.props.fallback(error);
 
     return (
-      <div className="rounded-panel border border-[#5c1d1d] bg-[#2a0d0d] p-4">
+      <div className="rounded-panel border border-fail-edge bg-fail-wash p-4">
         <p className="font-mono text-[11px] uppercase tracking-widest text-fail">
           this panel failed
         </p>

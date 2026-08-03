@@ -62,7 +62,7 @@ function Check({
           type="checkbox"
           checked={checked}
           onChange={(e) => onChange(e.target.checked)}
-          className="size-3.5 accent-[#ffb230]"
+          className="size-3.5 accent-accent"
         />
         <span className="font-mono text-[12px] text-ink-dim">{label}</span>
       </label>
@@ -85,7 +85,7 @@ function CapacityStrip({ needsGpu }: { needsGpu: boolean }) {
 
   if (vm.presence === "ready") {
     return (
-      <p className="rounded-panel border border-[#17452b] bg-[#0a1d12] px-3 py-2 font-mono text-[11px] text-ok">
+      <p className="rounded-panel border border-ok-edge bg-ok-wash px-3 py-2 font-mono text-[11px] text-ok">
         ● GPU ready — this job will use {vm.host || "the running VM"}.
       </p>
     );
@@ -93,7 +93,7 @@ function CapacityStrip({ needsGpu }: { needsGpu: boolean }) {
 
   if (vm.presence === "building") {
     return (
-      <p className="rounded-panel border border-[#4a3a10] bg-[#231a06] px-3 py-2 font-mono text-[11px] leading-relaxed text-warn">
+      <p className="rounded-panel border border-warn-edge bg-warn-wash px-3 py-2 font-mono text-[11px] leading-relaxed text-warn">
         ◐ A GPU VM is still building. You can start this job anyway — it will
         wait for the VM instead of failing.
       </p>

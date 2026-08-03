@@ -57,9 +57,9 @@ export function BackgroundField({
     const css = getComputedStyle(document.documentElement);
     const read = (name: string, fallback: string) =>
       css.getPropertyValue(name).trim() || fallback;
-    const ruleColor = read("--color-rule", "#1c2231");
-    const faintColor = read("--color-ink-faint", "#5b6577");
-    const accentColor = read("--color-accent", "#ffb230");
+    let ruleColor = read("--field-line", "#1c2231");
+    let faintColor = read("--field-point", "#5b6577");
+    let accentColor = read("--px-accent", "#ffb230");
 
     let width = 0;
     let height = 0;
@@ -202,6 +202,24 @@ export function BackgroundField({
     });
     observer.observe(canvas);
 
+    // The canvas paints its own colours, so a theme change has to be pushed
+    // into it — CSS alone cannot repaint pixels already drawn.
+    const rereadPalette = () => {
+      ruleColor = read("--field-line", "#1c2231");
+      faintColor = read("--field-point", "#5b6577");
+      accentColor = read("--px-accent", "#ffb230");
+      lastActivity = performance.now();
+      stop();
+      start();
+    };
+    const themeObserver = new MutationObserver(rereadPalette);
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    const schemeQuery = window.matchMedia("(prefers-color-scheme: light)");
+    schemeQuery.addEventListener("change", rereadPalette);
+
     const onReducedChange = () => {
       stop();
       lastActivity = performance.now();
@@ -227,6 +245,8 @@ export function BackgroundField({
       window.clearInterval(wake);
       window.clearTimeout(resizeTimer);
       observer.disconnect();
+      themeObserver.disconnect();
+      schemeQuery.removeEventListener("change", rereadPalette);
       window.removeEventListener("pointermove", onPointer);
       document.removeEventListener("visibilitychange", onVisibility);
       reducedQuery.removeEventListener("change", onReducedChange);

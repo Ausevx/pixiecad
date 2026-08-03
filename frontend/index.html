@@ -3,22 +3,41 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="dark light" />
     <title>PixieCAD</title>
-    <!-- Painted before the bundle parses, so a slow first load shows the app's
-         own near-black rather than a white flash on a dark-adapted screen. -->
+    <!-- Applied before the bundle parses, so a slow first load never flashes
+         the wrong theme at a dark-adapted or a daylit screen. Reads the same
+         key the app writes; absent means follow the OS. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("pixiecad.theme");
+          if (t === "light" || t === "dark")
+            document.documentElement.setAttribute("data-theme", t);
+        } catch (e) {}
+      })();
+    </script>
     <style>
       html,
       body {
         margin: 0;
         background: #06070a;
       }
-    </style>
-  </head>
-  <body>
-    <a
-      href="#main"
-      style="
+      @media (prefers-color-scheme: light) {
+        html:not([data-theme="dark"]),
+        html:not([data-theme="dark"]) body {
+          background: #f6f5f1;
+        }
+      }
+      html[data-theme="light"],
+      html[data-theme="light"] body {
+        background: #f6f5f1;
+      }
+      html[data-theme="dark"],
+      html[data-theme="dark"] body {
+        background: #06070a;
+      }
+      .skip {
         position: absolute;
         left: -9999px;
         top: 0;
@@ -26,12 +45,18 @@
         padding: 0.5rem 0.75rem;
         background: #ffb230;
         color: #06070a;
-        font: 600 12px ui-monospace, monospace;
-      "
-      onfocus="this.style.left='0.5rem';this.style.top='0.5rem'"
-      onblur="this.style.left='-9999px'"
-      >Skip to main content</a
-    >
+        font:
+          600 12px ui-monospace,
+          monospace;
+      }
+      .skip:focus {
+        left: 0.5rem;
+        top: 0.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to main content</a>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

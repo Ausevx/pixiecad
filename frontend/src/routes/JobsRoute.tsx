@@ -152,7 +152,7 @@ export function JobsRoute() {
       </div>
 
       {error && (
-        <p className="rounded-panel border border-[#5c1d1d] bg-[#2a0d0d] px-3 py-2 font-mono text-[12px] text-fail">
+        <p className="rounded-panel border border-fail-edge bg-fail-wash px-3 py-2 font-mono text-[12px] text-fail">
           {error}
         </p>
       )}
