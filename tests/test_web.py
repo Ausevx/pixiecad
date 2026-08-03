@@ -447,3 +447,16 @@ class TestJobFilesAndConvert:
         import pixiecad.web.app as m
 
         assert client.delete("/api/jobs/missing").status_code == 404
+
+
+class TestVmStatus:
+    def test_endpoint_degrades_without_gcloud(self, client):
+        d = client.get("/api/cloud/vm").json()
+        assert "available" in d and "vms" in d
+
+    def test_building_is_distinct_from_running(self, client):
+        """A VM is RUNNING long before its images exist; conflating them
+        invites jobs that fail on a missing docker image."""
+        d = client.get("/api/cloud/vm").json()
+        if d.get("available"):
+            assert "building" in d and "running" in d

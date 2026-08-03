@@ -787,6 +787,50 @@ def create_app(root: Path) -> FastAPI:
             "actions": actions,
         }
 
+    @app.get("/api/cloud/vm")
+    def vm_status():
+        """Is there a GPU VM up, and is it usable yet?
+
+        Deliberately cheap -- one gcloud call, no SSH -- because the dashboard
+        polls this. "Running" and "ready" are different things: a VM answers
+        as RUNNING within a minute of creation but cannot serve a job until
+        its worker images are built, which is ~30 minutes on a cold VM.
+        """
+        try:
+            from pixiecad.cloud import gcloud_status, list_instances
+
+            status = gcloud_status()
+            if not status.installed:
+                return {"available": False, "reason": "gcloud not installed", "vms": []}
+
+            project = status.project or ""
+            vms = []
+            for inst in list_instances(project=project):
+                vms.append({
+                    "name": inst.name,
+                    "zone": inst.zone,
+                    "status": inst.status,
+                    "gpu": inst.accelerator,
+                    "spot": inst.preemptible,
+                    "uptime_hours": inst.uptime_hours,
+                    "host": f"{inst.name}.{inst.zone}.{project}" if project else "",
+                })
+            running = [v for v in vms if str(v["status"]).upper() == "RUNNING"]
+            with lock:
+                prov = dict(provisioning)
+            return {
+                "available": True,
+                "vms": vms,
+                "running": len(running),
+                # Building means a provision is still in flight, so a job
+                # submitted now would fail on a missing docker image.
+                "building": prov.get("status") == "running",
+                "provision_status": prov.get("status"),
+                "host": (prov.get("host") or (running[0]["host"] if running else "")),
+            }
+        except Exception as exc:
+            return {"available": False, "reason": str(exc), "vms": []}
+
     @app.get("/api/cloud/inventory")
     def cloud_inventory():
         """Everything GCP bills this project for, with console deep links.

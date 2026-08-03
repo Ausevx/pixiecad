@@ -284,7 +284,7 @@
 <body>
   <header style="position:relative;">
     <h1><span>✨</span> PixieCAD Local Dashboard</h1>
-    <span id="app-version" data-version="v0.2.1"
+    <span id="app-version" data-version="v0.3.0"
           style="position:absolute;top:0.75rem;right:1rem;font-size:0.78rem;
                  font-weight:600;letter-spacing:0.08em;color:#f87171;
                  font-variant-numeric:tabular-nums;user-select:none;"></span>
@@ -415,7 +415,11 @@
             </div>
 
             <div class="form-group">
-              <label for="gpu-host">GPU host (optional)</label>
+              <label for="gpu-host" style="display:flex;justify-content:space-between;align-items:center;">
+                <span>GPU host (optional)</span>
+                <span id="vm-pill" style="font-size:0.75rem;padding:0.1rem 0.5rem;border-radius:999px;
+                      background:#1e293b;color:#64748b;white-space:nowrap;">checking…</span>
+              </label>
               <input type="text" id="gpu-host" name="gpu_host" class="form-control"
                      placeholder="name.zone.project, e.g. pixiecad-tex.asia-southeast1-b.my-project">
               <small style="opacity:0.7;">An SSH alias from <code>gcloud compute config-ssh</code>. Leave blank to run everything locally.</small>
@@ -645,6 +649,36 @@
         if (res.ok) { document.getElementById('job-files').innerHTML = ''; loadJobs(); }
       };
     }
+
+    // Live VM state. Running != usable: a VM answers RUNNING within a minute
+    // but cannot serve a job until its worker images are built (~30 min cold).
+    async function pollVm() {
+      const pill = document.getElementById('vm-pill');
+      let d;
+      try { d = await (await fetch('/api/cloud/vm')).json(); }
+      catch (e) { pill.textContent = 'unknown'; return; }
+
+      const set = (text, bg, fg) => {
+        pill.textContent = text;
+        pill.style.background = bg;
+        pill.style.color = fg;
+      };
+
+      if (!d.available) { set('gcloud unavailable', '#1e293b', '#64748b'); return; }
+      if (d.building) {
+        set('● building images…', '#78350f', '#fde68a');
+      } else if (d.running > 0) {
+        const v = d.vms.find(x => String(x.status).toUpperCase() === 'RUNNING');
+        const hrs = v && v.uptime_hours != null ? ' · ' + v.uptime_hours.toFixed(1) + 'h' : '';
+        set('● VM active' + hrs, '#14532d', '#bbf7d0');
+        const host = document.getElementById('gpu-host');
+        if (host && !host.value && d.host) host.value = d.host;
+      } else {
+        set('○ no VM running', '#1e293b', '#94a3b8');
+      }
+    }
+    pollVm();
+    setInterval(pollVm, 15000);
 
     document.getElementById('app-version').textContent =
       document.getElementById('app-version').dataset.version;
