@@ -541,3 +541,36 @@ class TestViewTagging:
             files=[("files", ("x.jpeg", buf.getvalue(), "image/jpeg"))],
         )
         assert r.status_code == 200
+
+
+class TestBakedImagePreference:
+    def test_only_matches_pixiecad_worker_images(self):
+        """An unrelated image in the project must never be booted as a worker."""
+        import inspect
+
+        from pixiecad.web import app as m
+
+        src = inspect.getsource(m._latest_machine_image)
+        assert "name~^pixiecad-worker" in src
+        assert "~creationTimestamp" in src, "must pick the newest"
+
+    def test_returns_empty_when_gcloud_is_absent(self, monkeypatch):
+        import subprocess as sp
+
+        from pixiecad.web import app as m
+
+        def boom(*a, **k):
+            raise FileNotFoundError("gcloud")
+
+        monkeypatch.setattr(sp, "run", boom)
+        assert m._latest_machine_image() == ""
+
+    def test_provision_falls_back_to_building_without_an_image(self):
+        """No image must still work, just slowly -- and say so."""
+        import inspect
+
+        from pixiecad.web import app as m
+
+        src = inspect.getsource(m.create_app)
+        assert "no baked machine image found" in src
+        assert "provision_gpu_vm.sh" in src

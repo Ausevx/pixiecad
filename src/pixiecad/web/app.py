@@ -86,6 +86,25 @@ def _ingest_rejections(ws_root: Path) -> list[str]:
     return lines
 
 
+def _latest_machine_image() -> str:
+    """Newest baked worker image, or "" if none exists.
+
+    Filtered by name prefix so an unrelated image in the project is never
+    launched as a worker.
+    """
+    try:
+        res = subprocess.run(
+            ["gcloud", "compute", "machine-images", "list",
+             "--filter=name~^pixiecad-worker",
+             "--sort-by=~creationTimestamp", "--limit=1",
+             "--format=value(name)"],
+            capture_output=True, text=True, timeout=60,
+        )
+        return (res.stdout or "").strip().splitlines()[0] if (res.stdout or "").strip() else ""
+    except Exception:
+        return ""
+
+
 def _gcp_project() -> str:
     """Project id from the environment, falling back to the gcloud config."""
     project = os.environ.get("PIXIECAD_GCP_PROJECT", "").strip()
@@ -948,14 +967,34 @@ def create_app(root: Path) -> FastAPI:
 
         def _run() -> None:
             scripts = Path(__file__).resolve().parents[3] / "scripts"
-            steps = [
-                [str(scripts / "provision_gpu_vm.sh"), req.name, req.zone, req.gpu, "hunyuan"],
-                [str(scripts / "setup_hunyuan_vm.sh"), req.name, req.zone],
-            ]
-            if req.texture:
-                steps.append([str(scripts / "setup_hunyuan_texture.sh"), req.name, req.zone])
-            if req.semantic:
-                steps.append([str(scripts / "setup_sam_vm.sh"), req.name, req.zone])
+
+            # Prefer a baked machine image when one exists: it already
+            # contains docker, all three worker images and the model caches,
+            # so this is a ~2 minute boot instead of a ~30 minute rebuild of
+            # byte-identical work billed at the GPU rate.
+            baked = _latest_machine_image()
+            if baked:
+                with lock:
+                    provisioning["log"].append(f"using baked image: {baked}")
+                    provisioning["baked"] = baked
+                steps = [[
+                    str(scripts / "launch_from_image.sh"), req.name, req.zone, baked,
+                ]]
+            else:
+                with lock:
+                    provisioning["log"].append(
+                        "no baked machine image found -- building from scratch "
+                        "(~30 min). Bake one with scripts/bake_image.sh to make "
+                        "future launches ~2 min."
+                    )
+                steps = [
+                    [str(scripts / "provision_gpu_vm.sh"), req.name, req.zone, req.gpu, "hunyuan"],
+                    [str(scripts / "setup_hunyuan_vm.sh"), req.name, req.zone],
+                ]
+                if req.texture:
+                    steps.append([str(scripts / "setup_hunyuan_texture.sh"), req.name, req.zone])
+                if req.semantic:
+                    steps.append([str(scripts / "setup_sam_vm.sh"), req.name, req.zone])
             try:
                 for step in steps:
                     with lock:
