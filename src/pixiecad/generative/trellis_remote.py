@@ -244,6 +244,27 @@ print("wrote out/mesh.glb from %s" % src)
 PYEOF"""
 
 
+def use_gated_dinov3() -> bool:
+    """Whether to run TRELLIS.2 with the real DINOv3 encoder.
+
+    The image ships an escape hatch that swaps in ungated DINOv2, and that is
+    the default because facebook/dinov3-* is gated:"manual" -- without it a
+    build is blocked on someone else's inbox. But DINOv2 is the fallback, not
+    the intended encoder: TRELLIS.2 was trained against DINOv3 features, so
+    the substitution costs quality in exchange for being able to run at all.
+
+    Opting back in is explicit rather than inferred from the presence of a
+    token, because holding a token is not the same as having been approved for
+    this particular repo -- and guessing wrong means discovering a 401 after
+    19 GB has already downloaded.
+    """
+    return os.environ.get("PIXIECAD_TRELLIS_DINOV3", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def resolve_hf_token() -> str | None:
     """Find a HuggingFace token the way huggingface_hub itself does.
 
@@ -366,6 +387,9 @@ class RemoteTrellisBackend:
                 images_dirname="images",
                 seed=seed,
                 texture=texture,
+                # Off by default; set PIXIECAD_TRELLIS_DINOV3=1 once the gated
+                # repo has actually been approved for this account.
+                avoid_gated=not use_gated_dinov3(),
                 # Leave room inside the job budget for boot and for rsyncing
                 # the result back, so the worker's own timeout trips first and
                 # reports a real error instead of ssh dying mid-stream.
