@@ -385,7 +385,8 @@ def create_app(root: Path) -> FastAPI:
                 photos_dir=photos_dir,
                 workspace=ws_dir,
                 dense=False,
-                bake=False,
+                bake=finish.bake_normals if finish else False,
+                normal_res=finish.normal_res if finish else 1024,
                 executor=executor,
                 generative_backend=backend,
                 split=split,
@@ -676,6 +677,8 @@ def create_app(root: Path) -> FastAPI:
         octree_resolution: int = Form(256),
         view_tags: str | None = Form(None),
         multiview: bool = Form(False),
+        bake_normals: bool = Form(True),
+        normal_res: int = Form(1024),
     ):
         # One session folder per upload: input/, work/ and output/ are never
         # shared between jobs, so two people uploading at once cannot read or
@@ -733,6 +736,11 @@ def create_app(root: Path) -> FastAPI:
             backend_val = None
         hint_val = object_hint.strip() if object_hint and object_hint.strip() else None
 
+        # Clamp to a range the dev machine can handle: baking runs locally,
+        # and an unclamped 4096 from a hand-crafted request would exhaust the
+        # 16 GB MacBook Air that is the supported dev target.
+        normal_res = max(256, min(2048, normal_res))
+
         finish = FinishOptions(
             smooth_iterations=max(0, smooth_iterations),
             texture=texture,
@@ -742,6 +750,8 @@ def create_app(root: Path) -> FastAPI:
             max_parts=max(1, max_parts),
             total_budget=target_faces,
             gpu_host=(gpu_host.strip() or None) if gpu_host else None,
+            bake_normals=bake_normals,
+            normal_res=normal_res,
         )
 
         # Geometric detail of the generative decode. This is the lever that
@@ -784,6 +794,8 @@ def create_app(root: Path) -> FastAPI:
                 "web_export": finish.web_export,
                 "texture_size": finish.texture_size,
                 "gpu_host": finish.gpu_host,
+                "bake_normals": finish.bake_normals,
+                "normal_res": finish.normal_res,
             },
             "web_url": None,
         }

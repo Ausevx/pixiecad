@@ -38,6 +38,11 @@ class FinishOptions:
     texture_size: int = 1024
     max_parts: int = 8
     total_budget: int = 20000
+    # On by default: recovering surface detail as a texture is nearly free
+    # compared to carrying those polygons through the face budget. Runs
+    # locally (on the user's machine), not on the GPU host.
+    bake_normals: bool = True
+    normal_res: int = 1024
     # Needed only by the stages that run on a GPU; absent means those stages
     # are skipped with an explanation rather than failing the whole job.
     gpu_host: str | None = None

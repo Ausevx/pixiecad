@@ -244,4 +244,9 @@ export interface NewJobParams {
   multiview: boolean;
   /** filename → tag. Applied by renaming on upload, server-side. */
   view_tags: Record<string, ViewTag>;
+  /** Bake surface detail from the high-poly source into a normal map after
+   *  decimation. On by default: cheaper than carrying the polygons. */
+  bake_normals: boolean;
+  /** Resolution of the baked normal map. Clamped server-side to [256, 2048]. */
+  normal_res: number;
 }

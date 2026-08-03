@@ -969,6 +969,115 @@ class TestStagesPublishedEarly:
         assert len(ingest_lines) == 1, f"logged {len(ingest_lines)} times: {ingest_lines}"
 
 
+class TestBakeNormalsWiring:
+    """Normal-map baking is wired from the form field all the way to _call_build.
+
+    Intercepts _call_build in app.py and records kwargs rather than running the
+    full pipeline, following the same pattern as the rest of this file.
+    """
+
+    @staticmethod
+    def _fake_result():
+        """Minimal BuildResult the job worker can destructure without error."""
+        from pixiecad.pipeline import BuildResult, Regime, StageOutcome
+
+        return BuildResult(
+            regime=Regime.SPARSE_VIEWS,
+            stages=[StageOutcome(name="ingest", status="ok", detail="", seconds=0.0)],
+            glb_path=None,
+            faces=None,
+            scale_applied=None,
+            warnings=[],
+        )
+
+    def test_bake_normals_true_reaches_call_build(self, tmp_path, monkeypatch):
+        """Posting bake_normals=true must reach _call_build with bake=True."""
+        import time
+
+        captured: dict = {}
+
+        def fake_call_build(**kwargs):
+            captured.update(kwargs)
+            return self._fake_result()
+
+        monkeypatch.setattr("pixiecad.web.app._call_build", fake_call_build)
+        client = TestClient(create_app(tmp_path))
+
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(30), "image/jpeg"))],
+            data={"name": "bake_on", "bake_normals": "true", "normal_res": "1024"},
+        )
+        assert res.status_code == 200
+
+        deadline = time.time() + 10
+        while time.time() < deadline and not captured:
+            time.sleep(0.05)
+
+        assert captured.get("bake") is True, (
+            f"expected bake=True, got {captured.get('bake')}"
+        )
+
+    def test_normal_res_clamp_values(self, tmp_path, monkeypatch):
+        """4096 → 2048, 64 → 256, 1024 stays 1024."""
+        import time
+
+        captured_calls: list[dict] = []
+
+        def fake_call_build(**kwargs):
+            captured_calls.append(dict(kwargs))
+            return self._fake_result()
+
+        monkeypatch.setattr("pixiecad.web.app._call_build", fake_call_build)
+        client = TestClient(create_app(tmp_path))
+
+        for res_in, res_expected in [(4096, 2048), (64, 256), (1024, 1024)]:
+            captured_calls.clear()
+            client.post(
+                "/api/jobs",
+                files=[("files", ("a.jpg", _generate_test_jpeg(31), "image/jpeg"))],
+                data={"name": f"clamp_{res_in}", "bake_normals": "true",
+                      "normal_res": str(res_in)},
+            )
+            deadline = time.time() + 10
+            while time.time() < deadline and not captured_calls:
+                time.sleep(0.05)
+            got = captured_calls[0].get("normal_res") if captured_calls else None
+            assert got == res_expected, (
+                f"normal_res={res_in} should clamp to {res_expected}, got {got}"
+            )
+
+    def test_default_is_bake_on_at_1024(self, tmp_path, monkeypatch):
+        """Omitting both fields must default to bake=True, normal_res=1024."""
+        import time
+
+        captured: dict = {}
+
+        def fake_call_build(**kwargs):
+            captured.update(kwargs)
+            return self._fake_result()
+
+        monkeypatch.setattr("pixiecad.web.app._call_build", fake_call_build)
+        client = TestClient(create_app(tmp_path))
+
+        client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(32), "image/jpeg"))],
+            data={"name": "defaults"},
+        )
+
+        deadline = time.time() + 10
+        while time.time() < deadline and not captured:
+            time.sleep(0.05)
+
+        assert captured.get("bake") is True, (
+            f"default bake should be True, got {captured.get('bake')}"
+        )
+        assert captured.get("normal_res") == 1024, (
+            f"default normal_res should be 1024, got {captured.get('normal_res')}"
+        )
+
+
 class TestBackendSelection:
     """The dashboard can point a job at a specific generative backend."""
 
