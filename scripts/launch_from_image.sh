@@ -97,7 +97,25 @@ sudo docker rm pixiecad-paintfix >/dev/null
 sudo docker run --rm "$IMG" python -c "import fast_simplification; print(\"  patched OK\")"
 ' || echo "WARNING: paint dependency check failed; texturing may not work"
 
-gcloud compute config-ssh --quiet >/dev/null 2>&1 || true
+# --project matters: without it this configures whatever the gcloud default
+# happens to be, which silently leaves THIS project's alias pointing at a dead
+# instance. A recreated VM reuses its name and often its IP, so the stale entry
+# looks correct right up until ssh rejects the new host key.
+gcloud compute config-ssh --project="$PROJECT" --quiet >/dev/null 2>&1 || true
+
+# Prove the alias works before calling the host ready. Everything downstream
+# reaches this VM through plain ssh, and a host-key mismatch surfaces there as
+# "backend not available" -- a long way from the actual cause.
+ALIAS="$NAME.$ZONE.$PROJECT"
+if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$ALIAS" true 2>/tmp/pixiecad-ssh-check; then
+  echo
+  echo "WARNING: the VM is up but 'ssh $ALIAS' fails:"
+  sed 's/^/  /' /tmp/pixiecad-ssh-check | tail -3
+  echo "  Jobs will fail with 'backend not available' until this is fixed."
+  echo "  Usually: gcloud compute config-ssh --project=$PROJECT"
+fi
+rm -f /tmp/pixiecad-ssh-check
+
 echo
-echo "ready:  $NAME.$ZONE.$PROJECT"
+echo "ready:  $ALIAS"
 echo "delete: gcloud compute instances delete $NAME --zone=$ZONE --quiet"
