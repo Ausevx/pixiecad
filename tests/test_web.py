@@ -593,11 +593,18 @@ class TestSpaServing:
             pytest.skip("SPA bundle not built; run `npm run build` in frontend/")
         return dist
 
-    def test_legacy_dashboard_still_served_at_root(self, client, spa_built):
-        """The old dashboard must keep working while the new one is built."""
-        res = client.get("/")
+    def test_root_redirects_into_the_spa(self, client, spa_built):
+        """One URL space: / sends you to /ui rather than serving a second copy
+        of the app whose asset paths point somewhere else."""
+        res = client.get("/", follow_redirects=False)
+        assert res.status_code == 307
+        assert res.headers["location"] == "/ui/"
+
+    def test_legacy_dashboard_stays_reachable(self, client):
+        """The old single-file dashboard is kept as a fallback."""
+        res = client.get("/legacy")
         assert res.status_code == 200
-        assert "PixieCAD" in res.text
+        assert "PixieCAD Local Dashboard" in res.text
 
     def test_spa_shell_at_ui(self, client, spa_built):
         res = client.get("/ui")
@@ -633,3 +640,243 @@ class TestSpaServing:
         res = client.get("/api/jobs")
         assert res.status_code == 200
         assert res.json() == []
+
+
+class TestRehydration:
+    """Jobs must survive a dashboard restart.
+
+    The registry is an in-process dict, but the sessions are on disk. Before
+    this, restarting the server emptied /api/jobs, 404'd every job URL, and
+    orphaned finished models that were sitting right there in output/ -- which
+    makes a deep link, or leaving and coming back, impossible to rely on.
+    """
+
+    def _session(self, root, name, *, job_id, finished):
+        from pixiecad.session import new_session
+
+        session = new_session(root, label=name)
+        session.write_meta(job_id=job_id, name=name, target_faces=20000)
+        if finished:
+            (session.output_dir / "model.glb").write_bytes(b"glTF-stub")
+            parts = session.output_dir / "parts"
+            parts.mkdir(exist_ok=True)
+            (parts / "wheel_0.glb").write_bytes(b"glTF-stub")
+        return session
+
+    def test_finished_job_is_restored(self, tmp_path):
+        self._session(tmp_path, "widget", job_id="aaa111", finished=True)
+        client = TestClient(create_app(tmp_path))
+
+        listing = client.get("/api/jobs").json()
+        assert [j["job_id"] for j in listing] == ["aaa111"]
+        assert listing[0]["status"] == "done"
+        assert listing[0]["restored"] is True
+
+        detail = client.get("/api/jobs/aaa111")
+        assert detail.status_code == 200, "a deep link must survive a restart"
+        assert detail.json()["glb_url"] == "/api/jobs/aaa111/model.glb"
+
+    def test_restored_job_can_still_be_downloaded(self, tmp_path):
+        """The point of restoring is reaching the artifacts, not the record."""
+        self._session(tmp_path, "widget", job_id="aaa111", finished=True)
+        client = TestClient(create_app(tmp_path))
+
+        assert client.get("/api/jobs/aaa111/model.glb").status_code == 200
+        files = client.get("/api/jobs/aaa111/files").json()
+        assert "model.glb" in [f["name"] for f in files["files"]]
+
+    def test_restored_job_exposes_its_parts(self, tmp_path):
+        self._session(tmp_path, "widget", job_id="aaa111", finished=True)
+        client = TestClient(create_app(tmp_path))
+
+        parts = client.get("/api/jobs/aaa111").json()["parts"]
+        assert [p["file"] for p in parts] == ["wheel_0.glb"]
+        assert client.get(parts[0]["url"]).status_code == 200
+
+    def test_interrupted_job_reads_as_failed_not_running(self, tmp_path):
+        """Nothing will ever advance it, so a spinner would never resolve."""
+        self._session(tmp_path, "halfway", job_id="bbb222", finished=False)
+        client = TestClient(create_app(tmp_path))
+
+        job = client.get("/api/jobs/bbb222").json()
+        assert job["status"] == "failed"
+        assert "interrupted" in " ".join(job["log"]).lower()
+
+    def test_sessions_without_a_job_id_still_appear(self, tmp_path):
+        """Pre-dashboard sessions are real work and must not be invisible."""
+        from pixiecad.session import new_session
+
+        session = new_session(tmp_path, label="cli-run")
+        session.write_meta()
+        (session.output_dir / "model.glb").write_bytes(b"glTF-stub")
+
+        listing = TestClient(create_app(tmp_path)).get("/api/jobs").json()
+        assert len(listing) == 1
+        assert listing[0]["job_id"] == session.root.name
+
+    def test_newest_job_is_listed_first(self, tmp_path):
+        self._session(tmp_path, "older", job_id="old", finished=True)
+        self._session(tmp_path, "newer", job_id="new", finished=True)
+        listing = TestClient(create_app(tmp_path)).get("/api/jobs").json()
+        assert [j["job_id"] for j in listing] == ["new", "old"]
+
+    def test_a_junk_session_does_not_break_the_listing(self, tmp_path):
+        (tmp_path / "broken").mkdir()
+        (tmp_path / "broken" / "session.json").write_text("{not json")
+        self._session(tmp_path, "fine", job_id="ok1", finished=True)
+
+        listing = TestClient(create_app(tmp_path)).get("/api/jobs").json()
+        assert [j["job_id"] for j in listing] == ["ok1"]
+
+
+class TestLogCursor:
+    """`log_since` keeps a long job's polling from being quadratic.
+
+    A GPU run is polled for many minutes while its log only grows; re-sending
+    the whole thing every couple of seconds costs more the longer the job runs,
+    which is exactly backwards.
+    """
+
+    def test_cursor_returns_only_new_lines(self, client, tmp_path):
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(1), "image/jpeg"))],
+            data={"name": "cursorjob"},
+        )
+        job_id = res.json()["job_id"]
+
+        first = client.get(f"/api/jobs/{job_id}").json()
+        assert first["log_since"] == 0
+        total = first["log_total"]
+        assert total == len(first["log"])
+
+        again = client.get(f"/api/jobs/{job_id}?log_since={total}").json()
+        assert again["log_since"] == total
+        assert again["log"] == again["log"][: len(again["log"])]
+        assert len(again["log"]) == again["log_total"] - total
+
+    def test_out_of_range_cursor_resyncs_the_whole_log(self, client):
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(2), "image/jpeg"))],
+            data={"name": "resync"},
+        )
+        job_id = res.json()["job_id"]
+
+        job = client.get(f"/api/jobs/{job_id}?log_since=9999").json()
+        assert job["log_since"] == 0, "a bad cursor must resync, not truncate"
+        assert len(job["log"]) == job["log_total"]
+
+    def test_negative_cursor_is_refused_safely(self, client):
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(3), "image/jpeg"))],
+            data={"name": "neg"},
+        )
+        job_id = res.json()["job_id"]
+        job = client.get(f"/api/jobs/{job_id}?log_since=-5").json()
+        assert job["log_since"] == 0
+        assert len(job["log"]) == job["log_total"]
+
+
+class TestStagesExposed:
+    """The pipeline records every stage with a real elapsed time. That was
+    being flattened into log strings and regex-parsed back apart in the
+    browser, which made measured timings unavailable to the interface."""
+
+    def test_job_detail_carries_a_stages_list(self, client):
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(4), "image/jpeg"))],
+            data={"name": "stagejob"},
+        )
+        job = client.get(f"/api/jobs/{res.json()['job_id']}").json()
+        assert "stages" in job
+        assert isinstance(job["stages"], list)
+
+    def test_stage_entries_have_name_status_and_seconds(self):
+        """Shape is asserted at the source so a rename cannot pass silently."""
+        import inspect
+
+        from pixiecad.web import app as m
+
+        src = inspect.getsource(m.create_app)
+        assert '"name": s.name' in src
+        assert '"status": s.status' in src
+        assert '"seconds": round(s.seconds, 3)' in src
+
+
+class TestQueuedGate:
+    """A job needing a GPU, submitted while one is still building, used to be
+    accepted and then die on a missing docker image -- the only warning being
+    a line of grey text far from the button."""
+
+    def test_gpu_job_queues_behind_an_in_flight_provision(self, tmp_path, monkeypatch):
+        """The behaviour, end to end: a texturing job submitted mid-provision
+        is accepted as queued instead of started and failed."""
+        import subprocess as sp
+        import time
+
+        # Hold the provision open so it is genuinely in flight when the job
+        # arrives, rather than racing to finish first.
+        def slow(*args, **kwargs):
+            time.sleep(5)
+            return sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(sp, "run", slow)
+
+        client = TestClient(create_app(tmp_path))
+        assert client.post("/api/cloud/provision", json={"gpu": "l4"}).status_code == 200
+
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(7), "image/jpeg"))],
+            # texture is what makes this job need a GPU at all.
+            data={"name": "needs_gpu", "texture": "true"},
+        )
+        assert res.status_code == 200
+        assert res.json().get("status") == "queued"
+
+        job = client.get(f"/api/jobs/{res.json()['job_id']}").json()
+        assert job["status"] == "queued"
+        assert "waiting for the gpu" in " ".join(job["log"]).lower()
+
+    def test_a_job_needing_no_gpu_is_not_gated(self, tmp_path, monkeypatch):
+        """Local work must not wait on infrastructure it does not use."""
+        import subprocess as sp
+        import time
+
+        def slow(*args, **kwargs):
+            time.sleep(5)
+            return sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(sp, "run", slow)
+
+        client = TestClient(create_app(tmp_path))
+        client.post("/api/cloud/provision", json={"gpu": "l4"})
+
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(8), "image/jpeg"))],
+            data={"name": "local_only", "texture": "false", "segmentation": "auto"},
+        )
+        assert res.json().get("status") != "queued"
+
+    def test_gate_is_wired_to_needs_gpu(self):
+        import inspect
+
+        from pixiecad.web import app as m
+
+        src = inspect.getsource(m.create_app)
+        assert "provision_running and finish.needs_gpu" in src
+        assert "_dispatch_when_gpu_ready" in src
+
+    def test_waiter_fails_the_job_when_provisioning_fails(self):
+        """A failed provision must not leave the job queued forever."""
+        import inspect
+
+        from pixiecad.web import app as m
+
+        src = inspect.getsource(m.create_app)
+        assert "GPU provisioning failed" in src
+        assert "Gave up waiting for the GPU VM" in src

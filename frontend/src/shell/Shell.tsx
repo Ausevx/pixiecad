@@ -1,6 +1,8 @@
 import { AnimatePresence, motion, MotionConfig } from "motion/react";
 import { useEffect } from "react";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { BackgroundField } from "./BackgroundField";
+import { ComputeDrawer } from "./ComputeDrawer";
 import { Header } from "./Header";
 import { ToastHost, toast } from "./toast";
 import { routeVariants } from "@/lib/motion";
@@ -103,12 +105,40 @@ export function Shell({
               animate="animate"
               exit="exit"
             >
-              {route.kind === "unknown" ? <NotFound path={route.path} /> : children}
+              {route.kind === "unknown" ? (
+                <NotFound path={route.path} />
+              ) : (
+                // Last line of defence: a crash in any screen leaves the
+                // header, the nav and the compute drawer usable rather than
+                // presenting a blank page with no way out.
+                <ErrorBoundary
+                  resetKey={route.kind === "job" ? route.id : route.kind}
+                  fallback={(error) => (
+                    <div className="mx-auto max-w-[1400px] px-5 py-20">
+                      <p className="font-mono text-[11px] uppercase tracking-widest text-fail">
+                        this screen failed
+                      </p>
+                      <p className="mt-2 font-mono text-[12px] leading-relaxed text-ink-dim">
+                        {error.message}
+                      </p>
+                      <a
+                        href={href({ kind: "jobs" })}
+                        className="mt-6 inline-block rounded-panel border border-rule-bright px-3 py-1.5 font-mono text-[11px] uppercase tracking-widest text-ink-dim hover:border-accent-dim hover:text-accent"
+                      >
+                        ← back to jobs
+                      </a>
+                    </div>
+                  )}
+                >
+                  {children}
+                </ErrorBoundary>
+              )}
             </motion.div>
           </AnimatePresence>
         </main>
       </div>
 
+      <ComputeDrawer open={drawer.open} onClose={() => drawer.setOpen(false)} />
       <ToastHost />
     </MotionConfig>
   );

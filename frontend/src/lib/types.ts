@@ -20,6 +20,10 @@ export interface JobSummary {
   status: JobStatus;
   stage: string;
   glb_url: string | null;
+  created_at?: string;
+  /** Rebuilt from disk after a restart, so its log and timings are gone even
+   *  though its artifacts are intact. Worth saying rather than pretending. */
+  restored?: boolean;
 }
 
 /** One pipeline stage as the pipeline itself recorded it (StageOutcome). */
@@ -56,8 +60,14 @@ export interface JobDetail {
   output_dir: string;
   /** Added server-side so the pipeline view stops regex-parsing the log. */
   stages?: StageOutcome[];
+  /** The cursor the server actually honoured. 0 means it resynced us and the
+   *  returned log is complete rather than a delta. */
+  log_since?: number;
   /** Total log length, so a `log_since` client knows where its cursor is. */
   log_total?: number;
+  web_url?: string | null;
+  created_at?: string;
+  restored?: boolean;
 }
 
 /** GET /api/jobs/{id}/files */

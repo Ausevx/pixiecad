@@ -10,13 +10,14 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import trimesh
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -85,6 +86,89 @@ def _ingest_rejections(ws_root: Path) -> list[str]:
             lines.append(f"  unreadable {Path(photo.get('source','?')).name}")
     lines.extend(f"  advice: {a}" for a in data.get("advice", []))
     return lines
+
+
+def _rehydrate_jobs(root: Path) -> dict[str, dict[str, Any]]:
+    """Rebuild the job registry from the session folders on disk.
+
+    The in-memory registry dies with the process, but the sessions do not:
+    every job's photos, workspace and finished model outlive any number of
+    restarts. Without this, restarting the dashboard emptied /api/jobs, made
+    every job URL a 404, and orphaned completed models that were sitting
+    right there in output/ -- which makes deep links and "come back later"
+    impossible to build on top of.
+
+    A job that was mid-run when the process died is reported as failed rather
+    than running: the thread that was doing the work is gone, so nothing will
+    ever advance it, and showing a spinner that can never resolve is worse
+    than an honest failure.
+    """
+    restored: dict[str, dict[str, Any]] = {}
+    if not root.is_dir():
+        return restored
+
+    for session_dir in sorted(root.iterdir()):
+        if not session_dir.is_dir() or session_dir.is_symlink():
+            continue
+        meta_file = session_dir / "session.json"
+        if not meta_file.is_file():
+            continue
+        try:
+            meta = json.loads(meta_file.read_text())
+        except Exception:
+            continue
+
+        # Sessions predating the dashboard have no job_id; the directory name
+        # is unique and stable, so it serves as one rather than dropping the
+        # session from the list entirely.
+        job_id = str(meta.get("job_id") or session_dir.name)
+        out_dir = session_dir / "output"
+        glb = out_dir / "model.glb"
+        done = glb.is_file()
+
+        parts: list[dict[str, Any]] = []
+        parts_dir = out_dir / "parts"
+        if parts_dir.is_dir():
+            for part in sorted(parts_dir.glob("*.glb")):
+                parts.append({
+                    "name": part.stem,
+                    "file": part.name,
+                    "faces": None,
+                    "url": f"/api/jobs/{job_id}/parts/{part.name}",
+                })
+
+        restored[job_id] = {
+            "job_id": job_id,
+            "name": meta.get("name") or meta.get("label") or session_dir.name,
+            "target_faces": meta.get("target_faces"),
+            "status": "done" if done else "failed",
+            "stage": "complete" if done else "failed",
+            "log": [
+                "Restored from disk after a dashboard restart."
+                if done
+                else "Restored from disk: this job was interrupted by a "
+                "dashboard restart and did not finish.",
+            ],
+            "report": None,
+            "glb_path": str(glb) if done else None,
+            "glb_url": f"/api/jobs/{job_id}/model.glb" if done else None,
+            "web_url": (
+                f"/api/jobs/{job_id}/model_web.glb"
+                if (out_dir / "model_web.glb").is_file()
+                else None
+            ),
+            "dir": str(session_dir),
+            "created_at": meta.get("created_at", ""),
+            "regime": None,
+            "faces": None,
+            "parts": parts,
+            "parts_dir": str(parts_dir) if parts_dir.is_dir() else None,
+            "warnings": [],
+            "stages": [],
+            "restored": True,
+        }
+
+    return restored
 
 
 def _latest_machine_image() -> str:
@@ -168,8 +252,9 @@ def create_app(root: Path) -> FastAPI:
     app = FastAPI(title="PixieCAD Dashboard")
     lock = threading.Lock()
 
-    # In-process dict storing jobs state
-    jobs: dict[str, dict[str, Any]] = {}
+    # Jobs seen this process, seeded from whatever is already on disk so a
+    # restart does not orphan finished work.
+    jobs: dict[str, dict[str, Any]] = _rehydrate_jobs(root)
     # Single in-flight provision: two concurrent builds on one project would
     # race for the same L4 quota of 1 and both fail confusingly.
     provisioning: dict[str, Any] = {}
@@ -314,6 +399,19 @@ def create_app(root: Path) -> FastAPI:
                 if hasattr(result.regime, "value")
                 else (str(result.regime) if getattr(result, "regime", None) else None)
             )
+            # The pipeline already records every stage with its status and a
+            # real elapsed time. That was being flattened into log strings and
+            # regex-parsed back apart in the browser; keeping the structure
+            # means the dashboard can show measured timings instead of guesses.
+            stage_outcomes = [
+                {
+                    "name": s.name,
+                    "status": s.status,
+                    "detail": s.detail,
+                    "seconds": round(s.seconds, 3),
+                }
+                for s in getattr(result, "stages", []) or []
+            ]
             glb_path = getattr(result, "glb_path", None)
             faces = getattr(result, "faces", None)
             parts_raw = getattr(result, "parts", None)
@@ -426,6 +524,7 @@ def create_app(root: Path) -> FastAPI:
                     job["parts"] = parts
                     job["parts_dir"] = str(parts_dir) if parts_dir else None
                     job["warnings"] = warnings
+                    job["stages"] = stage_outcomes
 
                     if glb_path:
                         job["status"] = "done"
@@ -442,11 +541,86 @@ def create_app(root: Path) -> FastAPI:
                     job["stage"] = "failed"
                     job["log"].append(f"Pipeline failed: {exc}")
 
-    @app.get("/", response_class=HTMLResponse)
+    def _dispatch_when_gpu_ready(
+        job_id: str, finish: FinishOptions, worker_args: tuple[Any, ...]
+    ) -> None:
+        """Hold a queued job until the in-flight provision finishes.
+
+        Polls the same provisioning record the dashboard shows, so the job and
+        the UI can never disagree about why it is waiting. A cold image build
+        is roughly thirty minutes, so the ceiling is generous; passing it means
+        something is wrong and the job is failed rather than left hanging.
+        """
+        deadline = time.monotonic() + 3600
+        while time.monotonic() < deadline:
+            with lock:
+                status = provisioning.get("status")
+                host = provisioning.get("host") or ""
+                job = jobs.get(job_id)
+            if job is None:
+                return  # deleted while waiting
+
+            if status == "ready":
+                # The freshly built host is what the job was waiting for, so
+                # it wins over whatever was in the form when it was submitted.
+                if host:
+                    finish.gpu_host = host
+                with lock:
+                    current = jobs.get(job_id)
+                    if current:
+                        current["log"].append(f"GPU ready at {host}; starting.")
+                _job_worker(*worker_args)
+                return
+
+            if status in {"failed", None}:
+                with lock:
+                    current = jobs.get(job_id)
+                    if current:
+                        current["status"] = "failed"
+                        current["stage"] = "failed"
+                        current["log"].append(
+                            "GPU provisioning failed, so this job never started. "
+                            "Provision a VM from Compute and submit again."
+                        )
+                return
+
+            time.sleep(5)
+
+        with lock:
+            current = jobs.get(job_id)
+            if current:
+                current["status"] = "failed"
+                current["stage"] = "failed"
+                current["log"].append(
+                    "Gave up waiting for the GPU VM after an hour."
+                )
+
+    @app.get("/")
     def index():
+        """The dashboard.
+
+        Redirects into the React app rather than serving it here, so there is
+        exactly one URL space: the bundle's assets and the client router both
+        live under /ui, and a job link is the same string wherever it came
+        from. A checkout that has never run `npm run build` in frontend/ falls
+        back to the original server-rendered page rather than a blank screen.
+        """
+        if (spa_dir / "index.html").is_file():
+            return RedirectResponse("/ui/", status_code=307)
+        if static_index.exists():
+            return HTMLResponse(static_index.read_text(encoding="utf-8"))
+        return HTMLResponse("<html><body><h1>PixieCAD Dashboard</h1></body></html>")
+
+    @app.get("/legacy", response_class=HTMLResponse)
+    def legacy_index():
+        """The previous dashboard, kept reachable.
+
+        It is one self-contained file with no build step, so it stays as a
+        fallback for anything the new interface has not yet earned trust on.
+        """
         if static_index.exists():
             return static_index.read_text(encoding="utf-8")
-        return "<html><body><h1>PixieCAD Dashboard</h1></body></html>"
+        raise HTTPException(status_code=404, detail="legacy dashboard not present")
 
     # ── The React SPA ────────────────────────────────────────────────────
     # Mounted at /ui rather than / so the legacy dashboard keeps working while
@@ -591,6 +765,8 @@ def create_app(root: Path) -> FastAPI:
             "parts": [],
             "parts_dir": None,
             "warnings": [],
+            "stages": [],
+            "created_at": session.created_at,
             "mode": mode,
             "split": split,
             "object_hint": hint_val,
@@ -608,15 +784,31 @@ def create_app(root: Path) -> FastAPI:
 
         with lock:
             jobs[job_id] = job_info
+            provision_running = provisioning.get("status") == "running"
 
-        thread = threading.Thread(
-            target=_job_worker,
-            args=(job_id, job_dir, target_faces, backend_val, split, hint_val, finish,
-                  gen_options, use_multiview),
-            daemon=True,
-        )
-        thread.start()
+        worker_args = (job_id, job_dir, target_faces, backend_val, split, hint_val,
+                       finish, gen_options, use_multiview)
 
+        # A job that needs a GPU, submitted while one is still being built,
+        # used to be accepted and then die on a missing docker image -- the
+        # only warning being a line of grey text far from the button. Holding
+        # it until the VM is ready turns a confusing failure into a wait, and
+        # costs the user nothing they were not already spending.
+        if provision_running and finish.needs_gpu:
+            with lock:
+                jobs[job_id]["status"] = "queued"
+                jobs[job_id]["stage"] = "waiting for GPU"
+                jobs[job_id]["log"].append(
+                    "Waiting for the GPU VM to finish building before starting."
+                )
+            threading.Thread(
+                target=_dispatch_when_gpu_ready,
+                args=(job_id, finish, worker_args),
+                daemon=True,
+            ).start()
+            return {"job_id": job_id, "status": "queued"}
+
+        threading.Thread(target=_job_worker, args=worker_args, daemon=True).start()
         return {"job_id": job_id}
 
     @app.get("/api/jobs")
@@ -629,29 +821,55 @@ def create_app(root: Path) -> FastAPI:
                     "status": j["status"],
                     "stage": j["stage"],
                     "glb_url": j["glb_url"],
+                    "created_at": j.get("created_at", ""),
+                    "restored": bool(j.get("restored")),
                 }
                 for j in jobs.values()
             ]
+        # Newest first: the job you just started is the one you want to see,
+        # and dict insertion order puts it last.
+        res.sort(key=lambda j: j.get("created_at") or "", reverse=True)
         return res
 
     @app.get("/api/jobs/{job_id}")
-    def get_job(job_id: str):
+    def get_job(job_id: str, log_since: int = 0):
+        """One job's full state.
+
+        ``log_since`` returns only the log lines after that index. A running
+        GPU job is polled for many minutes while its log only grows, and
+        re-sending the whole thing every couple of seconds is quadratic in the
+        length of the job for no benefit. ``log_total`` is always the true
+        length so a client can tell whether it is behind.
+        """
         with lock:
             job = jobs.get(job_id)
             if not job:
                 raise HTTPException(status_code=404, detail="Job not found")
+            log: list[str] = job["log"]
+            total = len(log)
+            # A negative or over-large cursor means the client and server
+            # disagree about history -- most likely the job was restarted.
+            # Sending the whole log resynchronises rather than silently
+            # leaving the client with a permanent hole in it.
+            start = log_since if 0 <= log_since <= total else 0
             return {
                 "job_id": job["job_id"],
                 "name": job["name"],
                 "status": job["status"],
                 "stage": job["stage"],
-                "log": list(job["log"]),
+                "log": log[start:],
+                "log_since": start,
+                "log_total": total,
                 "report": job["report"],
                 "glb_url": job["glb_url"],
+                "web_url": job.get("web_url"),
                 "regime": job.get("regime"),
                 "faces": job.get("faces"),
                 "parts": job.get("parts", []),
                 "warnings": job.get("warnings", []),
+                "stages": job.get("stages", []),
+                "created_at": job.get("created_at", ""),
+                "restored": bool(job.get("restored")),
                 # Where this job's files actually live, so the user can open
                 # the session folder instead of hunting through the jobs root.
                 "session": Path(job["dir"]).name,

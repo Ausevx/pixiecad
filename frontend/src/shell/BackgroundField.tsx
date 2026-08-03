@@ -115,7 +115,10 @@ export function BackgroundField({
         ctx.lineTo(width, Math.round(y + gy) + 0.5);
       }
       ctx.strokeStyle = ruleColor;
-      ctx.globalAlpha = 0.5 + current * 0.25;
+      // Kept low deliberately: this sits behind body text on every screen, and
+      // a background that competes with the content it is behind is wrong no
+      // matter how good it looks in isolation.
+      ctx.globalAlpha = 0.3 + current * 0.2;
       ctx.lineWidth = 1;
       ctx.stroke();
 
