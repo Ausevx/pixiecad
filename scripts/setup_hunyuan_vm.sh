@@ -95,6 +95,34 @@ sys.path.insert(0, '/opt/hunyuan2')
 from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline as MV
 print('hy3dgen (multi-view) import OK')
 "
+
+# Pull the weights NOW, into the host cache, so a bake captures them.
+#
+# The smoke test above only imports; it never calls from_pretrained, and it
+# runs --rm. So nothing was ever downloaded at build time and the first real
+# job on every fresh VM paid for ~10 GB of HuggingFace traffic at the GPU
+# rate. Worse, whether a machine image contained the weights depended on
+# whether someone happened to run a job before baking it -- which is not a
+# property you want decided by accident.
+#
+# The mounts match the ones hunyuan_remote.py uses at job time, so this warms
+# exactly the directories a job will later read. Both live on the boot disk,
+# which is what a machine image captures.
+echo "prefetching model weights into the host cache (~10 GB, once) ..."
+mkdir -p "$HOME/.cache/huggingface" "$HOME/.cache/hy3dgen"
+sudo docker run --rm --gpus all \
+  -v "$HOME/.cache/huggingface":/root/.cache/huggingface \
+  -v "$HOME/.cache/hy3dgen":/root/.cache/hy3dgen \
+  pixiecad-hunyuan:latest python -c "
+import sys
+sys.path.insert(0, '/opt/hunyuan/hy3dshape')
+from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
+Hunyuan3DDiTFlowMatchingPipeline.from_pretrained('tencent/Hunyuan3D-2.1')
+print('shape weights cached')
+"
+sudo chown -R "$USER":"$USER" "$HOME/.cache/huggingface" "$HOME/.cache/hy3dgen" 2>/dev/null || true
+du -sh "$HOME/.cache/huggingface" "$HOME/.cache/hy3dgen" 2>/dev/null || true
+
 echo BUILD_OK
 REMOTE
 )

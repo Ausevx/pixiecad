@@ -58,6 +58,10 @@ gcloud compute ssh "$NAME" --project="$PROJECT" --zone="$ZONE" --quiet --command
 set -e
 nvidia-smi --query-gpu=name --format=csv,noheader
 sudo docker images --format "{{.Repository}}:{{.Tag}}" | sort
+# Whether the weights came along in the image decides whether the first job
+# pays ~10 GB of download at the GPU rate. Report it rather than find out.
+echo "-- cached weights on this host --"
+du -sh "$HOME/.cache/huggingface" "$HOME/.cache/hy3dgen" 2>/dev/null || echo "  none cached"
 '
 
 # Self-healing patch for images baked before a dependency was discovered.
