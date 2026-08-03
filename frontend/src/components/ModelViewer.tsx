@@ -65,7 +65,10 @@ export default function ModelViewer(props: {
 
     // 1. Initialize Three.js Scene & Renderer
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#06070a");
+    // One step up from the page background rather than matching it: an object
+    // whose darkest faces are the same colour as the panel behind it has no
+    // silhouette at all.
+    scene.background = new THREE.Color("#12151d");
 
     const camera = new THREE.PerspectiveCamera(
       45,
@@ -95,13 +98,28 @@ export default function ModelViewer(props: {
     container.appendChild(renderer.domElement);
 
     // 2. Lighting setup: Hemisphere light + single Directional light (no shadows for performance)
-    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x333333, 1.2);
+    // Three lights, brighter than looks reasonable on paper. These meshes are
+    // untextured mid-grey on a near-black background, so a "tasteful" rig
+    // renders a dark object on a dark field that you genuinely cannot read --
+    // measured by rendering one and being unable to see it. A key from the
+    // front-right, a fill from the opposite side so the shadowed half is not
+    // solid black, and a rim from behind to separate the silhouette from the
+    // background. Still no shadow maps: they cost frames and add nothing here.
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x404652, 2.2);
     hemiLight.position.set(0, 20, 0);
     scene.add(hemiLight);
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
-    dirLight.position.set(5, 10, 7.5);
-    scene.add(dirLight);
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.6);
+    keyLight.position.set(5, 10, 7.5);
+    scene.add(keyLight);
+
+    const fillLight = new THREE.DirectionalLight(0xdfe6f2, 1.1);
+    fillLight.position.set(-6, 2, -4);
+    scene.add(fillLight);
+
+    const rimLight = new THREE.DirectionalLight(0xffb230, 0.7);
+    rimLight.position.set(-2, 4, -9);
+    scene.add(rimLight);
 
     // 3. Orbit Controls setup
     const controls = new OrbitControls(camera, renderer.domElement);

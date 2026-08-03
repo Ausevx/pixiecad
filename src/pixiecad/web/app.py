@@ -259,7 +259,6 @@ def create_app(root: Path) -> FastAPI:
     # race for the same L4 quota of 1 and both fail confusingly.
     provisioning: dict[str, Any] = {}
 
-    static_index = Path(__file__).parent / "static" / "index.html"
     # The React bundle. Built by `npm run build` in frontend/, which writes
     # here. Absent in a source checkout that has never run the build, so every
     # use of it is guarded rather than assumed.
@@ -612,29 +611,21 @@ def create_app(root: Path) -> FastAPI:
         Redirects into the React app rather than serving it here, so there is
         exactly one URL space: the bundle's assets and the client router both
         live under /ui, and a job link is the same string wherever it came
-        from. A checkout that has never run `npm run build` in frontend/ falls
-        back to the original server-rendered page rather than a blank screen.
+        from.
         """
         if (spa_dir / "index.html").is_file():
             return RedirectResponse("/ui/", status_code=307)
-        if static_index.exists():
-            return HTMLResponse(static_index.read_text(encoding="utf-8"))
-        return HTMLResponse("<html><body><h1>PixieCAD Dashboard</h1></body></html>")
-
-    @app.get("/legacy", response_class=HTMLResponse)
-    def legacy_index():
-        """The previous dashboard, kept reachable.
-
-        It is one self-contained file with no build step, so it stays as a
-        fallback for anything the new interface has not yet earned trust on.
-        """
-        if static_index.exists():
-            return static_index.read_text(encoding="utf-8")
-        raise HTTPException(status_code=404, detail="legacy dashboard not present")
+        # There is no longer a server-rendered fallback, so say what to do
+        # rather than serving a blank page to someone who just cloned this.
+        raise HTTPException(
+            status_code=503,
+            detail="dashboard bundle not built; run `npm run build` in frontend/",
+        )
 
     # ── The React SPA ────────────────────────────────────────────────────
-    # Mounted at /ui rather than / so the legacy dashboard keeps working while
-    # the new one is built: there is never a window where the tool is broken.
+    # Mounted at /ui, with / redirecting there, so the bundle's assets and the
+    # client router share one URL space and a job link is the same string
+    # wherever it came from.
     if (spa_dir / "index.html").is_file():
         app.mount(
             "/ui/assets",

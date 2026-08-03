@@ -61,11 +61,18 @@ WORKDIR /opt/hunyuan
 # Pins are relaxed as well: upstream pins numpy 1.24.4 alongside scipy 1.14.1,
 # which cannot both be satisfied here. numpy stays below 2 because pymeshlab
 # still expects the old ABI.
+#
+# trimesh is pinned because leaving it open already cost a run. Unpinned, it
+# drifted to 5.0.0, where simplify_quadric_decimation stopped being a built-in
+# and became a delegating import to fast_simplification -- so an image that was
+# correct when built started failing to texture, silently, after the GPU had
+# already loaded the paint pipeline. 5.0.0 is the version actually verified in
+# pixiecad-worker-v2; move the pin deliberately, not by accident.
 RUN pip install --no-cache-dir \
       "numpy<2" scipy pandas \
       transformers==4.46.0 diffusers==0.30.0 accelerate \
       huggingface_hub safetensors einops omegaconf pyyaml configargparse \
-      trimesh pygltflib xatlas pymeshlab \
+      "trimesh==5.0.0" pygltflib xatlas pymeshlab \
       opencv-python-headless imageio scikit-image \
       onnxruntime rembg torchdiffeq timm tqdm psutil \
       pytorch-lightning

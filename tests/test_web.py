@@ -35,6 +35,7 @@ def client(tmp_path: Path):
 
 
 def test_get_root(client):
+    """/ redirects into the SPA; following it must land on the real app."""
     res = client.get("/")
     assert res.status_code == 200
     assert "pixiecad" in res.text.lower()
@@ -274,18 +275,43 @@ class TestFinishingOptionsWiring:
     the user ticked.
     """
 
-    def test_form_fields_match_the_api(self):
-        """Every finishing input in the HTML must be a real API parameter."""
-        import inspect
+    def _new_job_params(self) -> set[str]:
+        """The fields the React client declares it sends, read from its types."""
         import re
+
+        types_ts = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "frontend" / "src" / "lib" / "types.ts"
+        )
+        if not types_ts.is_file():
+            pytest.skip("frontend sources not present")
+        block = re.search(
+            r"export interface NewJobParams \{(.*?)\n\}", types_ts.read_text(), re.S
+        )
+        assert block, "NewJobParams interface not found"
+        return set(re.findall(r"^\s*(\w+)\??:", block.group(1), re.M))
+
+    def test_client_fields_are_all_accepted_by_the_api(self):
+        """Every field the client sends must be a real /api/jobs parameter.
+
+        A renamed field fails silently otherwise: the server falls back to its
+        default and quietly does not do what the user ticked.
+        """
+        import inspect
 
         from pixiecad.web import app as app_module
 
-        html = (
-            pathlib.Path(app_module.__file__).parent / "static" / "index.html"
-        ).read_text()
-        names = set(re.findall(r'name="([a-z_]+)"', html))
         source = inspect.getsource(app_module.create_app)
+        for field in self._new_job_params():
+            if field == "view_tags":
+                continue  # sent as JSON under its own name, asserted below
+            assert f"{field}:" in source, f"{field} not accepted by /api/jobs"
+        assert "view_tags" in source
+
+    def test_finishing_controls_are_still_wired(self):
+        """The finishing options specifically, since they are the ones that
+        silently degrade to a local-only run when they go missing."""
+        params = self._new_job_params()
         for field in (
             "smooth_iterations",
             "texture",
@@ -295,8 +321,20 @@ class TestFinishingOptionsWiring:
             "max_parts",
             "gpu_host",
         ):
-            assert field in names, f"{field} missing from the dashboard form"
-            assert f"{field}:" in source, f"{field} not accepted by /api/jobs"
+            assert field in params, f"{field} missing from the client's params"
+
+    def test_client_sends_every_field_it_declares(self):
+        """types.ts is a declaration; NewJobRoute is what actually builds the
+        request. They must not drift apart."""
+        route = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "frontend" / "src" / "routes" / "NewJobRoute.tsx"
+        )
+        if not route.is_file():
+            pytest.skip("frontend sources not present")
+        body = route.read_text()
+        for field in self._new_job_params():
+            assert field in body, f"{field} declared but never sent by NewJobRoute"
 
     def test_defaults_do_not_require_a_gpu(self):
         """An untouched form must run entirely locally."""
@@ -390,26 +428,6 @@ class TestCloudInventory:
             cloud._json = original
         assert resources[0].est_usd_per_month is None
         assert "disk still bills" in resources[0].advice
-
-
-class TestDashboardVersion:
-    def test_version_badge_present_and_semver(self):
-        """One source of truth: the data-version attribute in the header."""
-        import re
-
-        from pixiecad.web import app as app_module
-
-        html = (pathlib.Path(app_module.__file__).parent / "static" / "index.html").read_text()
-        m = re.search(r'id="app-version" data-version="(v\d+\.\d+\.\d+)"', html)
-        assert m, "dashboard version badge missing or malformed"
-
-    def test_stage_track_is_rendered_from_the_log(self):
-        """Derived from log markers, so it cannot drift from what ran."""
-        from pixiecad.web import app as app_module
-
-        html = (pathlib.Path(app_module.__file__).parent / "static" / "index.html").read_text()
-        assert 'id="stage-track"' in html
-        assert "renderStages(job)" in html
 
 
 class TestJobFilesAndConvert:
@@ -599,12 +617,6 @@ class TestSpaServing:
         res = client.get("/", follow_redirects=False)
         assert res.status_code == 307
         assert res.headers["location"] == "/ui/"
-
-    def test_legacy_dashboard_stays_reachable(self, client):
-        """The old single-file dashboard is kept as a fallback."""
-        res = client.get("/legacy")
-        assert res.status_code == 200
-        assert "PixieCAD Local Dashboard" in res.text
 
     def test_spa_shell_at_ui(self, client, spa_built):
         res = client.get("/ui")
