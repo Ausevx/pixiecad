@@ -180,6 +180,22 @@ export interface CloudSnapshot {
   has_running_gpu?: boolean;
 }
 
+/** GET /api/backends — which generative model a job may be pointed at. */
+export interface BackendOption {
+  key: string;
+  label: string;
+  /** What must exist for this backend to run at all, or null for none. */
+  requires: "gpu_host" | "fal_key" | null;
+  /** False when the backend has never produced a model on this project. */
+  validated: boolean;
+  note: string;
+}
+
+export interface BackendList {
+  backends: BackendOption[];
+  fal_key_present: boolean;
+}
+
 /** GET /api/cloud/inventory */
 export interface BillableResource {
   name: string;

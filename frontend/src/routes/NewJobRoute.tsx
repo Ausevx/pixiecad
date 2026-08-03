@@ -1,14 +1,14 @@
 import { motion } from "motion/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { PhotoDrop, type PhotoEntry } from "@/components/PhotoDrop";
-import { createJob } from "@/lib/api";
+import { createJob, getBackends } from "@/lib/api";
 import { useReducedMotion } from "@/lib/hooks";
 import { snap } from "@/lib/motion";
 import { refreshJobs } from "@/lib/jobs";
 import { go, useDrawer } from "@/lib/router";
 import { useVm } from "@/lib/vm";
 import { toast } from "@/shell/toast";
-import type { NewJobParams, ViewTag } from "@/lib/types";
+import type { BackendOption, NewJobParams, ViewTag } from "@/lib/types";
 
 /* ─────────────────────────────────────────────────────────────────────────
    New job — one screen, one intent.
@@ -75,6 +75,79 @@ function Check({
   );
 }
 
+/** Which generative model produces the geometry.
+ *
+ *  Defaults to automatic, which is what every job has actually used. The other
+ *  entries are shown even when they cannot run, greyed and with the reason,
+ *  because "why can't I pick TRELLIS" is a better question to be able to
+ *  answer than to hide. Unvalidated backends say so plainly rather than
+ *  letting someone spend a GPU hour discovering it. */
+function BackendPicker({
+  value,
+  onChange,
+  hasGpuHost,
+}: {
+  value: string;
+  onChange: (key: string) => void;
+  hasGpuHost: boolean;
+}) {
+  const [list, setList] = useState<BackendOption[]>([]);
+  const [falKey, setFalKey] = useState(false);
+
+  useEffect(() => {
+    getBackends()
+      .then((r) => {
+        setList(r.backends);
+        setFalKey(r.fal_key_present);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const runnable = (b: BackendOption) =>
+    b.requires === null ||
+    (b.requires === "gpu_host" && hasGpuHost) ||
+    (b.requires === "fal_key" && falKey);
+
+  const selected = list.find((b) => b.key === value);
+
+  if (list.length === 0) return null;
+
+  return (
+    <Field label="generative model">
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={inputClass}
+      >
+        {list.map((b) => (
+          <option key={b.key} value={b.key} disabled={!runnable(b)}>
+            {b.label}
+            {!runnable(b)
+              ? b.requires === "gpu_host"
+                ? " — needs a GPU host"
+                : " — needs FAL_KEY"
+              : b.validated
+                ? ""
+                : " — unvalidated"}
+          </option>
+        ))}
+      </select>
+      {selected && (
+        <>
+          <span className="font-mono text-[10px] leading-relaxed text-ink-faint">
+            {selected.note}
+          </span>
+          {!selected.validated && (
+            <span className="font-mono text-[10px] leading-relaxed text-warn">
+              ⚠ This backend has never produced a model on this project.
+            </span>
+          )}
+        </>
+      )}
+    </Field>
+  );
+}
+
 /** The only compute question this screen asks. It reports capacity and offers
  *  to get some, inline, without leaving the form. */
 function CapacityStrip({ needsGpu }: { needsGpu: boolean }) {
@@ -131,6 +204,7 @@ export function NewJobRoute() {
   const [height, setHeight] = useState("");
   const [hint, setHint] = useState("");
   const [octree, setOctree] = useState(256);
+  const [backend, setBackend] = useState("auto");
   const [split, setSplit] = useState(true);
   const [multiview, setMultiview] = useState(false);
   const [smooth, setSmooth] = useState(5);
@@ -171,6 +245,7 @@ export function NewJobRoute() {
       max_parts: maxParts,
       octree_resolution: octree,
       multiview,
+      backend,
       // The host the VM store already knows about, so the user never types an
       // SSH alias by hand. Blank when there is none, which is exactly what the
       // server expects for a local run.
@@ -278,6 +353,12 @@ export function NewJobRoute() {
               <option value={512}>maximum — slowest, most VRAM</option>
             </select>
           </Field>
+
+          <BackendPicker
+            value={backend}
+            onChange={setBackend}
+            hasGpuHost={Boolean(vm.host)}
+          />
 
           <Check checked={split} onChange={setSplit} label="split into parts" />
           <Check

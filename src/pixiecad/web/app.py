@@ -725,7 +725,12 @@ def create_app(root: Path) -> FastAPI:
         ws_dir = session.work_dir / "ws"
         Workspace.create(ws_dir, spec)
 
-        backend_val = backend.strip() if backend and backend.strip() else None
+        # "auto" is the dashboard's word for "you choose"; the pipeline spells
+        # that None. Without this the literal string reaches get_backend and
+        # fails as an unregistered backend name.
+        backend_val = (backend or "").strip() or None
+        if backend_val == "auto":
+            backend_val = None
         hint_val = object_hint.strip() if object_hint and object_hint.strip() else None
 
         finish = FinishOptions(
@@ -1169,6 +1174,74 @@ def create_app(root: Path) -> FastAPI:
             }
         except Exception as exc:
             return {"available": False, "reason": str(exc), "resources": []}
+
+    @app.get("/api/backends")
+    def list_backends():
+        """The generative backends a job may be pointed at.
+
+        Deliberately static rather than probing each one. available() on a
+        remote backend opens an SSH connection and asks the host what it has;
+        doing that for every backend on every page load would make the new-job
+        form wait on the network to render a dropdown. What each backend NEEDS
+        is fixed and knowable here, so the client greys out what cannot run
+        using the VM state it already tracks.
+
+        `validated` is the honest bit: a backend can be wired up and reachable
+        and still never have produced a model on this project. Offering those
+        without saying so invites someone to pick one and lose a GPU hour.
+        """
+        return {
+            "backends": [
+                {
+                    "key": "auto",
+                    "label": "Automatic",
+                    "requires": None,
+                    "validated": True,
+                    "note": (
+                        "Picks the first backend that is actually usable, "
+                        "preferring your own GPU over paid APIs. This is what "
+                        "every job has used so far."
+                    ),
+                },
+                {
+                    "key": "hunyuan-remote",
+                    "label": "Hunyuan3D 2.1",
+                    "requires": "gpu_host",
+                    "validated": True,
+                    "note": (
+                        "The measured baseline: 170 s generation and 123 s "
+                        "texturing on an L4. Single-view by default; the "
+                        "multi-view checkpoint is an older architecture."
+                    ),
+                },
+                {
+                    "key": "trellis-remote",
+                    "label": "TRELLIS.2",
+                    "requires": "gpu_host",
+                    "validated": False,
+                    "note": (
+                        "Never completed a run on this project. Needs an L4 "
+                        "specifically (the image ships Ada-only kernels), a "
+                        "64 GB host, and a Hugging Face token for its gated "
+                        "DINOv3 encoder. Expect to debug it."
+                    ),
+                },
+                {
+                    "key": "fal",
+                    "label": "fal.ai (hosted)",
+                    "requires": "fal_key",
+                    "validated": False,
+                    "note": (
+                        "Third-party paid API, billed per generation to a "
+                        "separate account. Needs FAL_KEY in the server's "
+                        "environment. Your photos leave your machine."
+                    ),
+                },
+            ],
+            # Reported so the client does not have to guess whether the paid
+            # fallback is even configured.
+            "fal_key_present": bool(os.environ.get("FAL_KEY", "").strip()),
+        }
 
     @app.get("/api/gpu-options")
     def gpu_options(texture: bool = True, semantic: bool = True):

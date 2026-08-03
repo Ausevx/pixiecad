@@ -1,4 +1,5 @@
 import type {
+  BackendList,
   CloudInventory,
   CloudSnapshot,
   ConvertResult,
@@ -150,6 +151,11 @@ export function createJob(
     xhr.send(form);
   });
 }
+
+/** Which generative backends exist. Static server-side, so this is cheap and
+ *  safe to fetch on the new-job screen. */
+export const getBackends = (signal?: AbortSignal) =>
+  request<BackendList>("/api/backends", { signal });
 
 /* ── Compute ──────────────────────────────────────────────────────────── */
 

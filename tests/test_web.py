@@ -967,3 +967,70 @@ class TestStagesPublishedEarly:
 
         ingest_lines = [ln for ln in job["log"] if ln.startswith("[OK] ingest")]
         assert len(ingest_lines) == 1, f"logged {len(ingest_lines)} times: {ingest_lines}"
+
+
+class TestBackendSelection:
+    """The dashboard can point a job at a specific generative backend."""
+
+    def test_lists_backends_with_requirements(self, client):
+        d = client.get("/api/backends").json()
+        keys = {b["key"] for b in d["backends"]}
+        assert {"auto", "hunyuan-remote", "trellis-remote", "fal"} <= keys
+        for b in d["backends"]:
+            assert b["requires"] in (None, "gpu_host", "fal_key")
+            assert b["note"]
+
+    def test_auto_is_first_and_needs_nothing(self, client):
+        first = client.get("/api/backends").json()["backends"][0]
+        assert first["key"] == "auto"
+        assert first["requires"] is None
+
+    def test_unvalidated_backends_are_flagged(self, client):
+        """A backend that has never produced a model here must say so, rather
+        than letting someone spend a GPU hour finding out."""
+        by_key = {b["key"]: b for b in client.get("/api/backends").json()["backends"]}
+        assert by_key["hunyuan-remote"]["validated"] is True
+        assert by_key["trellis-remote"]["validated"] is False
+        assert by_key["fal"]["validated"] is False
+
+    def test_auto_is_translated_to_no_backend(self, client):
+        """'auto' is the dashboard's word; the pipeline spells it None. Passing
+        the literal through would fail as an unregistered backend name."""
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(21), "image/jpeg"))],
+            data={"name": "autobackend", "backend": "auto"},
+        )
+        assert res.status_code == 200
+        job = client.get(f"/api/jobs/{res.json()['job_id']}").json()
+        assert "not registered" not in " ".join(job["log"]).lower()
+
+    def test_an_explicit_backend_is_honoured(self, client):
+        import time
+
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(22), "image/jpeg"))],
+            data={"name": "fakebackend", "backend": "fake"},
+        )
+        job_id = res.json()["job_id"]
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            job = client.get(f"/api/jobs/{job_id}").json()
+            if job["status"] in ("done", "failed"):
+                break
+            time.sleep(0.1)
+        gen = [s for s in job["stages"] if s["name"] == "generate"]
+        assert gen and "fake" in gen[0]["detail"]
+
+    def test_the_picker_sends_backend(self):
+        """The control exists in the form and its value reaches the request."""
+        route = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "frontend" / "src" / "routes" / "NewJobRoute.tsx"
+        )
+        if not route.is_file():
+            pytest.skip("frontend sources not present")
+        body = route.read_text()
+        assert "BackendPicker" in body
+        assert "backend," in body, "backend must be included in the request params"
