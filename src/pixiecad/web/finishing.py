@@ -38,9 +38,19 @@ class FinishOptions:
     texture_size: int = 1024
     max_parts: int = 8
     total_budget: int = 20000
-    # On by default: recovering surface detail as a texture is nearly free
-    # compared to carrying those polygons through the face budget. Runs
-    # locally (on the user's machine), not on the GPU host.
+    # On by default: recovering surface detail as a texture beats carrying the
+    # polygons through the face budget. But it is not free -- this stage runs
+    # on the user's own machine, not the GPU host, and is by far the heaviest
+    # thing the local pipeline does. Measured against a 1.31M face mesh, the
+    # scale a generative backend actually returns:
+    #
+    #   1024x1024   13.6 s   3.4 GB peak RSS
+    #   2048x2048   52.9 s   4.1 GB peak RSS
+    #
+    # against ~250 MB for every other local stage combined. That is why
+    # create_job clamps normal_res to 2048 rather than run_build's 4096
+    # ceiling: 4096 would put a background dashboard job within reach of the
+    # 16 GB dev machine's limit while its owner is still using it.
     bake_normals: bool = True
     normal_res: int = 1024
     # Needed only by the stages that run on a GPU; absent means those stages
@@ -178,29 +188,97 @@ def finish_model(
     return report
 
 
+def run_semantic_segmentation(
+    mesh,
+    executor,
+    max_parts: int,
+    *,
+    cache_dir: "Path | None" = None,
+    log: "Callable[[str], None]" = lambda _m: None,
+) -> "tuple[list, bool]":
+    """Render views, run SAM on the GPU host, and fuse labels into parts.
+
+    Returns ``(parts_list, used_cache)``.  Labels are persisted under
+    ``cache_dir/sam-labels-<mesh_hash>/`` (keyed on vertex+face bytes) so a
+    re-run with the same geometry skips the ~125 s SAM pass.
+    ``PrecomputedSegmenter`` is used on the cache-hit path — no parallel
+    caching mechanism alongside it.
+
+    Raises on any failure so callers can decide on the fallback-with-warning
+    style that fits their context (dashboard log vs. CLI echo).
+    """
+    import hashlib
+
+    import numpy as np
+
+    from ..parts.render import render_mesh
+    from ..parts.sam_remote import PrecomputedSegmenter, RemoteSAMSegmenter
+    from ..parts.segment import parts_from_labels
+    from ..parts.semantic import segment_semantic
+
+    # Key on vertex+face bytes: any geometry change invalidates the cache, and
+    # nothing else (resolution, max_parts) changes the raw label maps.
+    h = hashlib.sha256()
+    h.update(mesh.vertices.tobytes())
+    h.update(mesh.faces.tobytes())
+    mesh_hash = h.hexdigest()[:16]
+
+    renders: list = []
+    labels: "dict[str, np.ndarray] | None" = None
+
+    if cache_dir is not None:
+        label_dir = Path(cache_dir) / f"sam-labels-{mesh_hash}"
+        if (label_dir / "_done").exists():
+            # render_mesh is cheap; redo it so Render objects' array identities
+            # match what PrecomputedSegmenter will be handed below.
+            log("SAM labels found in cache — skipping GPU inference.")
+            renders = render_mesh(mesh, resolution=768)
+            labels = {}
+            for r in renders:
+                npy = label_dir / f"{r.camera.name}.npy"
+                if npy.exists():
+                    labels[r.camera.name] = np.load(npy)
+    else:
+        label_dir = None
+
+    used_cache = labels is not None
+    if labels is None:
+        log("Rendering 14 views for semantic segmentation...")
+        renders = render_mesh(mesh, resolution=768)
+        log("Running SAM on GPU host (about 2 minutes)...")
+        labels = RemoteSAMSegmenter(executor).segment_renders(renders)
+
+        if label_dir is not None:
+            label_dir.mkdir(parents=True, exist_ok=True)
+            for name, arr in labels.items():
+                np.save(label_dir / f"{name}.npy", arr)
+            (label_dir / "_done").write_text("ok\n")
+
+    result = segment_semantic(
+        mesh,
+        PrecomputedSegmenter(renders, labels),
+        renders=renders,
+        max_parts=max_parts,
+    )
+    parts = parts_from_labels(mesh, result.face_labels, max_parts=max_parts)
+    return parts, used_cache
+
+
 def _segment(mesh, options: FinishOptions, report: FinishReport, log) -> list:
     """Split the mesh, semantically if asked for and possible."""
-    from ..parts.segment import parts_from_labels, split_parts
+    from ..parts.segment import split_parts
 
     if options.segmentation == "semantic" and options.gpu_host:
         try:
-            from ..parts.render import render_mesh
-            from ..parts.sam_remote import PrecomputedSegmenter, RemoteSAMSegmenter
-            from ..parts.semantic import segment_semantic
-
-            log("Rendering 14 views for semantic segmentation...")
-            renders = render_mesh(mesh, resolution=768)
-            log("Running SAM on GPU host (about 2 minutes)...")
-            labels = RemoteSAMSegmenter(_executor(options.gpu_host)).segment_renders(renders)
-            result = segment_semantic(
+            parts, _ = run_semantic_segmentation(
                 mesh,
-                PrecomputedSegmenter(renders, labels),
-                renders=renders,
-                max_parts=options.max_parts,
+                _executor(options.gpu_host),
+                options.max_parts,
+                log=log,
             )
-            log(f"Semantic segmentation produced {result.n_clusters} parts.")
+            log(f"Semantic segmentation produced {len(parts)} parts.")
             report.steps.append("segment:semantic")
-            return parts_from_labels(mesh, result.face_labels, max_parts=options.max_parts)
+            return parts
         except Exception as exc:
             report.warnings.append(f"semantic segmentation failed, using geometric: {exc}")
             log(f"WARNING: {report.warnings[-1]}")

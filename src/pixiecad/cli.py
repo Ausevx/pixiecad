@@ -237,6 +237,11 @@ def run(
         False, "--multiview",
         help="Condition on up to 4 cardinal views (older 2.0-line model; usually worse)",
     ),
+    segmentation: str = typer.Option(
+        "auto",
+        "--segmentation",
+        help="Part segmentation method: auto (geometric, default) | semantic (SAM on GPU host)",
+    ),
 ):
     """Headless end-to-end run: photos in, .glb (+ parts) out, in a fresh session folder.
 
@@ -247,6 +252,31 @@ def run(
     from .executors import SSHExecutor
     from .pipeline import run_build
     from .session import new_session
+
+    # Validate --segmentation before any expensive work begins so the user
+    # sees a clear message rather than a confusing mid-build traceback.
+    if segmentation not in ("auto", "semantic"):
+        typer.echo(
+            f"⚠ unknown --segmentation value '{segmentation}'; "
+            "valid choices are 'auto' and 'semantic'. Falling back to auto.",
+        )
+        segmentation = "auto"
+
+    if segmentation == "semantic" and not split:
+        typer.echo(
+            "⚠ --segmentation semantic has no effect when --no-split is active; "
+            "using auto.",
+        )
+        segmentation = "auto"
+
+    if segmentation == "semantic" and not host:
+        # Print a one-line explanation and keep going; silently downgrading is
+        # just as confusing as hard-failing when the user intended semantic.
+        typer.echo(
+            "⚠ --segmentation semantic needs a GPU host (--host); "
+            "using geometric segmentation instead.",
+        )
+        segmentation = "auto"
 
     session = new_session(runs_root, label=label, source=photos)
     staged = session.stage_inputs(photos)
@@ -288,6 +318,54 @@ def run(
         typer.echo("  " + line)
     for w in result.warnings:
         typer.echo(f"⚠ {w}")
+
+    # If semantic segmentation was requested and the build produced a mesh with
+    # parts enabled, replace the geometric split with a SAM-fused one.
+    # pipeline.py is untouched; run_semantic_segmentation (shared with the
+    # dashboard) owns the render→SAM→fuse logic for both callers.
+    if segmentation == "semantic" and result.glb_path and split:
+        import trimesh
+
+        from .parts import export_parts
+        from .vision.triage import name_parts
+        from .web.finishing import run_semantic_segmentation
+
+        try:
+            mesh = trimesh.load(result.glb_path, force="mesh", process=False)
+            typer.echo("semantic segmentation: rendering views and calling SAM...")
+            # Labels are cached in the workspace stages directory; a re-run of
+            # the same session (same mesh bytes) skips the ~125 s GPU pass.
+            parts_list, used_cache = run_semantic_segmentation(
+                mesh,
+                executor,
+                max_parts,
+                cache_dir=ws.stages_dir,
+                log=lambda m: typer.echo(f"  {m}"),
+            )
+            if used_cache:
+                typer.echo("  (labels loaded from cache)")
+            named = name_parts(parts_list, mesh, object_hint=object_hint)
+            # Export into the workspace output dir so collect_outputs can copy
+            # to session.output_dir/parts the same way the geometric path does.
+            parts_out = ws.root / "output" / "parts"
+            exported, _ = export_parts(
+                named,
+                parts_out,
+                total_budget=target_faces,
+                whole_volume=abs(mesh.volume) or None,
+            )
+            result.parts[:] = [
+                {
+                    "name": e.name,
+                    "file": e.file,
+                    "faces": e.faces,
+                    "target_faces": e.target_faces,
+                }
+                for e in exported
+            ]
+            result.parts_dir = str(parts_out)
+        except Exception as exc:
+            typer.echo(f"⚠ semantic segmentation failed, using geometric parts: {exc}")
 
     collected = collect_outputs(result, session, drawings=drawings, spec=spec)
     session.write_meta(
