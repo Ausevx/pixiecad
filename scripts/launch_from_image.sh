@@ -138,6 +138,28 @@ check_dep() {
 }
 check_dep pixiecad-hunyuan-paint:latest fast_simplification
 check_dep pixiecad-hunyuan:latest rtree
+
+# Not a missing module but the same shape of problem: an image baked before a
+# fix, which cannot be un-baked. trimesh 5.0.0 changed
+# simplify_quadric_decimation'"'"'s first positional argument from a face count to
+# a fraction, so Hunyuan'"'"'s paint code raises "target_reduction must be between
+# 0 and 1" -- and only after the GPU has loaded the whole paint pipeline.
+IMG=pixiecad-hunyuan-paint:latest
+if sudo docker image inspect "$IMG" >/dev/null 2>&1; then
+  if sudo docker run --rm "$IMG" grep -q "simplify_quadric_decimation(face_count=" \
+       /opt/hunyuan/hy3dpaint/utils/simplify_mesh_utils.py 2>/dev/null; then
+    echo "  simplify_quadric_decimation already patched in $IMG"
+  else
+    echo "  patching $IMG simplify_quadric_decimation call ..."
+    sudo docker rm -f pixiecad-simplifyfix >/dev/null 2>&1 || true
+    sudo docker run --name pixiecad-simplifyfix "$IMG" \
+      sed -i "s/courent.simplify_quadric_decimation(target_count)/courent.simplify_quadric_decimation(face_count=target_count)/" \
+      /opt/hunyuan/hy3dpaint/utils/simplify_mesh_utils.py
+    sudo docker commit pixiecad-simplifyfix "$IMG" >/dev/null
+    sudo docker rm pixiecad-simplifyfix >/dev/null
+    echo "  simplify_quadric_decimation patched OK"
+  fi
+fi
 ' || echo "WARNING: dependency check failed; texturing or baking may not work"
 
 # --project matters: without it this configures whatever the gcloud default

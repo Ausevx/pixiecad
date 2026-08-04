@@ -62,6 +62,16 @@ RUN pip install --no-cache-dir "bpy==4.2.0"
 # loaded -- about 15 s of GPU time and a fully generated mesh wasted, and the
 # job completes untextured with only a warning to show for it.
 RUN pip install --no-cache-dir fast_simplification \
+
+# trimesh 5.0.0 changed simplify_quadric_decimation's first positional
+# parameter from a face COUNT to a fraction (percent, 0-1). Hunyuan's paint
+# code passes a count positionally, so on the pinned trimesh it raises
+# "target_reduction must be between 0 and 1" -- after the GPU has already
+# loaded the paint pipeline, so it costs a full texturing attempt to discover.
+# The pin is deliberate (fast_simplification), so the call site is what moves.
+RUN sed -i 's/courent.simplify_quadric_decimation(target_count)/courent.simplify_quadric_decimation(face_count=target_count)/' \
+      /opt/hunyuan/hy3dpaint/utils/simplify_mesh_utils.py \
+ && grep -q 'face_count=target_count' /opt/hunyuan/hy3dpaint/utils/simplify_mesh_utils.py
  && python -c "import fast_simplification; print('fast_simplification import OK')"
 # realesrgan pulls basicsr, which imports torchvision.transforms.functional_tensor
 # -- removed from torchvision years ago, so the import dies on any current
