@@ -109,7 +109,7 @@ function Reoptimise({ jobId, faces }: { jobId: string; faces: number }) {
         <input
           type="range"
           min={100}
-          max={200000}
+          max={2000000}
           step={500}
           value={target}
           onChange={(e) => setTarget(Number(e.target.value))}

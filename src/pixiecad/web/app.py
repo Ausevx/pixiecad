@@ -733,6 +733,18 @@ def create_app(root: Path) -> FastAPI:
             with dest.open("wb") as buffer:
                 shutil.copyfileobj(f.file, buffer)
 
+        # ObjectSpec enforces target_faces > 0, but it raises a pydantic
+        # ValidationError deep inside create_job -- a 500 and a traceback for
+        # what is plainly a bad request. The ceiling matters too: the budget
+        # only ever shrinks a generated mesh, and the largest any backend
+        # returns is TRELLIS at ~1.9M, so anything past 2M is a typo that would
+        # otherwise be accepted and quietly do nothing.
+        if target_faces < 100 or target_faces > 2_000_000:
+            raise HTTPException(
+                422,
+                f"target_faces must be between 100 and 2,000,000 (got {target_faces})",
+            )
+
         l_val = length.strip() if length and length.strip() else None
         w_val = width.strip() if width and width.strip() else None
         h_val = height.strip() if height and height.strip() else None

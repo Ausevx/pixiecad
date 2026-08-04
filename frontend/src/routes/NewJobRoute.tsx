@@ -558,12 +558,20 @@ export function NewJobRoute() {
 
           <Field
             label="target triangles"
-            hint="Simplification budget. Independent of generation detail."
+            hint={
+              bakeNormals && targetFaces > 400000
+                ? "Above ~400k the normal-map bake gets slow: it loops in Python over every low-poly face. Turn baking off, or lower this."
+                : "Simplification budget. Independent of generation detail. Backends return 0.9M–1.9M faces; set it there to keep the mesh whole."
+            }
           >
             <input
               type="number"
               min={100}
-              max={200000}
+              // The generative backends return 969k (Hunyuan) to 1.9M
+              // (TRELLIS) faces, so a 200k ceiling silently threw most of the
+              // geometry away with no way to ask for it. The server never had
+              // this limit -- ObjectSpec only requires > 0.
+              max={2000000}
               value={targetFaces}
               onChange={(e) => setTargetFaces(Number(e.target.value))}
               className={`${inputClass} tabular-nums`}

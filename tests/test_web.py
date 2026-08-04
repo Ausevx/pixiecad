@@ -1421,3 +1421,37 @@ class TestRerunIsNotAutomatic:
 
     def test_plan_for_a_missing_job_is_404(self, client):
         assert client.get("/api/jobs/nope/rerun-plan").status_code == 404
+
+
+class TestTargetFaceCeiling:
+    """The triangle budget must be able to hold what the backends produce.
+
+    Hunyuan returns ~969k faces and TRELLIS ~1.92M. A 200k ceiling in the form
+    silently discarded most of that geometry, and there was no way to ask for
+    it -- the server never had the limit, only the number input did.
+    """
+
+    def test_the_form_allows_a_whole_generated_mesh(self):
+        src = Path("frontend/src/routes/NewJobRoute.tsx").read_text()
+        assert "max={2000000}" in src
+        assert "max={200000}" not in src, "the old ceiling is below every backend's output"
+
+    def test_the_server_accepts_a_budget_above_the_old_cap(self, client, tmp_path):
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(50), "image/jpeg"))],
+            data={"name": "big", "target_faces": "1900000"},
+        )
+        assert res.status_code == 200
+        job_id = res.json()["job_id"]
+        assert client.get(f"/api/jobs/{job_id}").json()["job_id"] == job_id
+
+    def test_zero_and_negative_budgets_are_still_refused(self, client):
+        """Raising a ceiling must not remove the floor."""
+        for bad in ("0", "-5"):
+            res = client.post(
+                "/api/jobs",
+                files=[("files", ("a.jpg", _generate_test_jpeg(51), "image/jpeg"))],
+                data={"name": "bad", "target_faces": bad},
+            )
+            assert res.status_code >= 400, f"target_faces={bad} must be rejected"
