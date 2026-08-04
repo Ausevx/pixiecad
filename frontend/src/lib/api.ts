@@ -9,6 +9,7 @@ import type {
   JobSummary,
   NewJobParams,
   ProvisionState,
+  RerunPlan,
   StageCosts,
   VmStatus,
 } from "./types";
@@ -239,15 +240,22 @@ export const getStageCosts = (
  *  available to compare against. `gpu_host` overrides the host recorded on the
  *  original, which matters because "there is a host now" is the usual reason
  *  to retry at all. */
-export function rerunJob(jobId: string, gpuHost?: string): Promise<{
-  job_id: string;
-  status?: string;
-  rerun_of: string;
-}> {
+export function rerunJob(
+  jobId: string,
+  overrides: Record<string, string | number | boolean | undefined> = {},
+): Promise<{ job_id: string; status?: string; rerun_of: string }> {
   const body = new FormData();
-  if (gpuHost) body.append("gpu_host", gpuHost);
+  for (const [k, v] of Object.entries(overrides)) {
+    // Omitted means "keep what the original used" server-side, so undefined
+    // must not be sent as the string "undefined".
+    if (v !== undefined && v !== null) body.append(k, String(v));
+  }
   return request(`/api/jobs/${encodeURIComponent(jobId)}/rerun`, {
     method: "POST",
     body,
   });
 }
+
+/** What a rerun would use. Fetching this starts nothing. */
+export const getRerunPlan = (jobId: string, signal?: AbortSignal) =>
+  request<RerunPlan>(`/api/jobs/${encodeURIComponent(jobId)}/rerun-plan`, { signal });

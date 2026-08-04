@@ -1349,3 +1349,68 @@ class TestRerun:
             (Path(restored.get(f"/api/jobs/{new_id}").json()["dir"]) / "session.json").read_text()
         )
         assert meta["settings"]["object_hint"] == "a lighter"
+
+
+class TestRerunIsNotAutomatic:
+    """Fetching the plan must not start anything, and overrides must win.
+
+    The first version of rerun fired on click, which silently reused settings
+    the user could neither see nor change. Reviewing them is the point.
+    """
+
+    def test_the_plan_starts_nothing(self, client):
+        job_id, _ = TestRerun._finished_job(client)
+        before = len(client.get("/api/jobs").json())
+        plan = client.get(f"/api/jobs/{job_id}/rerun-plan").json()
+        assert plan["can_rerun"] is True
+        assert plan["photo_count"] == 1
+        assert len(client.get("/api/jobs").json()) == before, (
+            "reading the plan must never create a job"
+        )
+
+    def test_the_plan_reports_the_settings_that_would_be_used(self, client):
+        job_id, _ = TestRerun._finished_job(
+            client, texture_size="512", object_hint="a lighter", split="false"
+        )
+        plan = client.get(f"/api/jobs/{job_id}/rerun-plan").json()
+        assert plan["has_settings"] is True
+        assert plan["settings"]["texture_size"] == 512
+        assert plan["settings"]["object_hint"] == "a lighter"
+        assert plan["settings"]["split"] is False
+
+    def test_an_override_replaces_the_stored_value(self, client):
+        job_id, _ = TestRerun._finished_job(client, texture_size="512")
+        new_id = client.post(
+            f"/api/jobs/{job_id}/rerun", data={"texture_size": "2048"}
+        ).json()["job_id"]
+        meta = json.loads(
+            (Path(client.get(f"/api/jobs/{new_id}").json()["dir"]) / "session.json").read_text()
+        )
+        assert meta["settings"]["texture_size"] == 2048
+
+    def test_omitted_fields_keep_the_original_value(self, client):
+        """A confirmation screen sends what it shows; anything it does not
+        send must not silently revert to a default."""
+        job_id, _ = TestRerun._finished_job(client, texture_size="512", max_parts="3")
+        new_id = client.post(
+            f"/api/jobs/{job_id}/rerun", data={"texture_size": "2048"}
+        ).json()["job_id"]
+        meta = json.loads(
+            (Path(client.get(f"/api/jobs/{new_id}").json()["dir"]) / "session.json").read_text()
+        )
+        assert meta["settings"]["max_parts"] == 3, "untouched settings must survive"
+
+    def test_auto_backend_is_normalised_on_override(self, client):
+        """'auto' is the dashboard's word; the pipeline spells it None, and the
+        literal string is not a registered backend name."""
+        job_id, _ = TestRerun._finished_job(client)
+        new_id = client.post(
+            f"/api/jobs/{job_id}/rerun", data={"backend": "auto"}
+        ).json()["job_id"]
+        meta = json.loads(
+            (Path(client.get(f"/api/jobs/{new_id}").json()["dir"]) / "session.json").read_text()
+        )
+        assert meta["settings"]["backend"] is None
+
+    def test_plan_for_a_missing_job_is_404(self, client):
+        assert client.get("/api/jobs/nope/rerun-plan").status_code == 404

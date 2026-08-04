@@ -1,13 +1,9 @@
 import { AnimatePresence, motion } from "motion/react";
-import type React from "react";
 import { useMemo, useState } from "react";
-import { go, href } from "@/lib/router";
+import { href } from "@/lib/router";
 import { jobLayoutId, listItemVariants, listVariants, signatures, snap } from "@/lib/motion";
-import { refreshJobs, useJobs } from "@/lib/jobs";
+import { useJobs } from "@/lib/jobs";
 import { useReducedMotion } from "@/lib/hooks";
-import { rerunJob } from "@/lib/api";
-import { useVm } from "@/lib/vm";
-import { toast } from "@/shell/toast";
 import { isTerminal, type JobStatus, type JobSummary } from "@/lib/types";
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -106,42 +102,23 @@ function JobRow({ job }: { job: JobSummary }) {
   );
 }
 
-/** Rerun straight from the list, without opening the job first.
+/** Link to the rerun confirmation screen, straight from the list.
  *
- *  Always rendered rather than revealed on hover: a hover-only control is
- *  invisible to keyboard and touch, and this is the fastest path back after a
- *  run that failed on infrastructure rather than on anything the user chose.
+ *  A link rather than a button: it navigates, and making it a button would
+ *  both lie about that and lose middle-click and open-in-new-tab. Always
+ *  rendered rather than revealed on hover, which would hide it from keyboard
+ *  and touch.
  */
 function RerunRow({ jobId, name }: { jobId: string; name: string }) {
-  const [busy, setBusy] = useState(false);
-  const vm = useVm();
-
-  async function run(e: React.MouseEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    setBusy(true);
-    try {
-      const res = await rerunJob(jobId, vm.host);
-      refreshJobs();
-      toast("ok", "Rerun started", `${name} — same photos and settings.`);
-      go({ kind: "job", id: res.job_id });
-    } catch (err) {
-      toast("fail", "Could not rerun", err instanceof Error ? err.message : "");
-      setBusy(false);
-    }
-  }
-
   return (
-    <button
-      type="button"
-      onClick={run}
-      disabled={busy}
+    <a
+      href={`${href({ kind: "new" })}?from=${encodeURIComponent(jobId)}`}
       aria-label={`Rerun ${name}`}
-      title="Start a new job from this one's photos and settings"
-      className="mr-3 shrink-0 rounded-sharp border border-rule px-2 py-1 font-mono text-[11px] text-ink-faint transition-colors hover:border-accent-edge hover:text-accent disabled:opacity-50"
+      title="Review this job's settings, then start a new build from them"
+      className="mr-3 shrink-0 rounded-sharp border border-rule px-2 py-1 font-mono text-[11px] text-ink-faint transition-colors hover:border-accent-edge hover:text-accent"
     >
-      {busy ? "…" : "↻"}
-    </button>
+      ↻
+    </a>
   );
 }
 

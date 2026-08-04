@@ -275,3 +275,19 @@ export interface StageCosts {
   has_unmeasured: boolean;
   bake_location_resolved: "local" | "host" | null;
 }
+
+/** GET /api/jobs/{id}/rerun-plan — what a rerun WOULD use. Read-only:
+ *  fetching it starts nothing. */
+export interface RerunPlan {
+  job_id: string;
+  name: string;
+  status: JobStatus;
+  target_faces: number;
+  photos: string[];
+  photo_count: number;
+  can_rerun: boolean;
+  settings: Record<string, unknown>;
+  /** False for sessions written before settings were persisted; the form
+   *  falls back to its own defaults and has to say so. */
+  has_settings: boolean;
+}

@@ -894,8 +894,76 @@ def create_app(root: Path) -> FastAPI:
         threading.Thread(target=_job_worker, args=worker_args, daemon=True).start()
         return {"job_id": job_id}
 
+    @app.get("/api/jobs/{job_id}/rerun-plan")
+    def rerun_plan(job_id: str):
+        """What a rerun of this job WOULD use, without starting anything.
+
+        Read-only on purpose. The rerun button used to fire immediately, which
+        silently reused settings the user could not see and had no chance to
+        change -- fine when the last run failed on infrastructure, wrong when
+        they wanted to adjust something. This is what the confirmation screen
+        reads.
+        """
+        with lock:
+            job = jobs.get(job_id)
+            if job is None:
+                raise HTTPException(404, "job not found")
+            settings = dict(job.get("settings") or {})
+            name = job.get("name") or "object"
+            target_faces = int(job.get("target_faces") or 20000)
+            src_dir = Path(job["dir"])
+            status = job.get("status")
+
+        photos_dir = src_dir / "input"
+        photos = (
+            sorted(p.name for p in photos_dir.iterdir() if p.is_file())
+            if photos_dir.is_dir()
+            else []
+        )
+        return {
+            "job_id": job_id,
+            "name": name,
+            "status": status,
+            "target_faces": target_faces,
+            "photos": photos,
+            "photo_count": len(photos),
+            # False when the photos are gone: the screen can say so up front
+            # rather than letting someone fill in a form that cannot submit.
+            "can_rerun": bool(photos) and status not in ("running", "queued"),
+            "settings": settings,
+            # Sessions written before settings were persisted have none, so the
+            # form falls back to its own defaults and must say it is doing that.
+            "has_settings": bool(settings),
+        }
+
     @app.post("/api/jobs/{job_id}/rerun")
-    def rerun_job(job_id: str, gpu_host: str | None = Form(None)):
+    def rerun_job(
+        job_id: str,
+        gpu_host: str | None = Form(None),
+        # Every setting is an optional override. Absent means "keep what the
+        # original used", so a confirmation screen can send back only what the
+        # user actually changed, and a bare POST still reproduces the old run.
+        name: str | None = Form(None),
+        target_faces: int | None = Form(None),
+        mode: str | None = Form(None),
+        split: bool | None = Form(None),
+        object_hint: str | None = Form(None),
+        backend: str | None = Form(None),
+        length: str | None = Form(None),
+        width: str | None = Form(None),
+        height: str | None = Form(None),
+        smooth_iterations: int | None = Form(None),
+        texture: bool | None = Form(None),
+        segmentation: str | None = Form(None),
+        web_export: bool | None = Form(None),
+        texture_size: int | None = Form(None),
+        max_parts: int | None = Form(None),
+        octree_resolution: int | None = Form(None),
+        multiview: bool | None = Form(None),
+        bake_normals: bool | None = Form(None),
+        normal_res: int | None = Form(None),
+        bake_location: str | None = Form(None),
+    ):
         """Start a fresh job from an existing one's photos and settings.
 
         A new session rather than a reset of the old one. The failed run's log
@@ -919,8 +987,37 @@ def create_app(root: Path) -> FastAPI:
                 )
             src_dir = Path(original["dir"])
             settings = dict(original.get("settings") or {})
-            name = original.get("name") or "object"
-            target_faces = int(original.get("target_faces") or 20000)
+            name = (name or "").strip() or original.get("name") or "object"
+            target_faces = int(
+                target_faces if target_faces is not None
+                else (original.get("target_faces") or 20000)
+            )
+
+        # Overrides land on top of the stored settings. None means untouched --
+        # distinct from an empty string, which is a real value for the text
+        # fields (clearing the object hint, say).
+        overrides = {
+            "mode": mode, "split": split, "object_hint": object_hint,
+            "backend": backend, "length": length, "width": width,
+            "height": height, "smooth_iterations": smooth_iterations,
+            "texture": texture, "segmentation": segmentation,
+            "web_export": web_export, "texture_size": texture_size,
+            "max_parts": max_parts, "octree_resolution": octree_resolution,
+            "multiview": multiview, "bake_normals": bake_normals,
+            "normal_res": normal_res, "bake_location": bake_location,
+        }
+        settings.update({k: v for k, v in overrides.items() if v is not None})
+        if backend is not None:
+            # "auto" is the dashboard's word for "you choose"; the pipeline
+            # spells that None, and the literal string is not a registered
+            # backend name.
+            settings["backend"] = None if backend.strip() in ("", "auto") else backend.strip()
+        if object_hint is not None:
+            settings["object_hint"] = object_hint.strip() or None
+
+        with lock:
+            if job_id not in jobs:
+                raise HTTPException(404, "job not found")
 
         src_photos = src_dir / "input"
         if not src_photos.is_dir() or not any(src_photos.iterdir()):

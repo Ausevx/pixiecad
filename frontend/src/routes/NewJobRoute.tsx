@@ -1,16 +1,17 @@
 import { motion } from "motion/react";
 import { useEffect, useState } from "react";
 import { PhotoDrop, type PhotoEntry } from "@/components/PhotoDrop";
-import { createJob, getBackends, getStageCosts } from "@/lib/api";
+import { createJob, getBackends, getRerunPlan, getStageCosts, rerunJob } from "@/lib/api";
 import { useReducedMotion } from "@/lib/hooks";
 import { snap } from "@/lib/motion";
 import { refreshJobs } from "@/lib/jobs";
-import { go, useDrawer } from "@/lib/router";
+import { go, href, useDrawer, useLocation } from "@/lib/router";
 import { useVm } from "@/lib/vm";
 import { toast } from "@/shell/toast";
 import type {
   BackendOption,
   NewJobParams,
+  RerunPlan,
   StageCost,
   StageCosts,
   ViewTag,
@@ -318,11 +319,114 @@ export function NewJobRoute() {
   const [bakeLocation, setBakeLocation] =
     useState<"auto" | "local" | "host">("auto");
 
+  // ── Rerun mode ─────────────────────────────────────────────────────────
+  // ?from=<job id> turns this screen into a confirmation step: every control
+  // is prefilled from that job and the photos come from its session, so
+  // nothing is re-uploaded. It is still the ordinary form, which is the point
+  // -- reviewing the old settings and changing one of them are the same
+  // gesture, and no build starts until the submit button is pressed.
+  const { search } = useLocation();
+  const rerunOf = new URLSearchParams(search).get("from");
+  const [plan, setPlan] = useState<RerunPlan | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!rerunOf) {
+      setPlan(null);
+      setPlanError(null);
+      return;
+    }
+    const ac = new AbortController();
+    getRerunPlan(rerunOf, ac.signal)
+      .then((p) => {
+        setPlan(p);
+        const s = p.settings as Record<string, unknown>;
+        const str = (k: string, d: string) =>
+          typeof s[k] === "string" ? (s[k] as string) : d;
+        const num = (k: string, d: number) =>
+          typeof s[k] === "number" ? (s[k] as number) : d;
+        const bool = (k: string, d: boolean) =>
+          typeof s[k] === "boolean" ? (s[k] as boolean) : d;
+
+        setName(p.name);
+        setTargetFaces(p.target_faces);
+        setLength(str("length", ""));
+        setWidth(str("width", ""));
+        setHeight(str("height", ""));
+        setHint(str("object_hint", ""));
+        setOctree(num("octree_resolution", 256));
+        setBackend(str("backend", "auto") || "auto");
+        setSplit(bool("split", true));
+        setMultiview(bool("multiview", false));
+        setSmooth(num("smooth_iterations", 5));
+        setMaxParts(num("max_parts", 8));
+        setSegmentation(str("segmentation", "auto") === "semantic" ? "semantic" : "auto");
+        setTexture(bool("texture", false));
+        setWebExport(bool("web_export", true));
+        setTextureSize(num("texture_size", 1024));
+        setBakeNormals(bool("bake_normals", true));
+        setNormalRes(num("normal_res", 1024));
+        const loc = str("bake_location", "auto");
+        setBakeLocation(loc === "local" || loc === "host" ? loc : "auto");
+        // Advanced settings are prefilled from a previous run, so they are not
+        // defaults any more -- hiding them behind a collapsed disclosure would
+        // defeat the confirmation this screen exists for.
+        setShowAdvanced(true);
+      })
+      .catch((err) =>
+        setPlanError(err instanceof Error ? err.message : "could not load that job"),
+      );
+    return () => ac.abort();
+  }, [rerunOf]);
+
   const taggedCount = photos.filter((p) => p.tag).length;
   const needsGpu = texture || segmentation === "semantic";
+  const reusingPhotos = Boolean(rerunOf && plan);
+  const canSubmit = reusingPhotos ? Boolean(plan?.can_rerun) : photos.length > 0;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+
+    // A rerun sends the form's current values as overrides against the
+    // original job's stored settings, and reuses its photos server-side.
+    if (rerunOf) {
+      if (!plan?.can_rerun) {
+        toast("warn", "Cannot rerun", "That job's photos are no longer on disk.");
+        return;
+      }
+      setBusy(true);
+      try {
+        const res = await rerunJob(rerunOf, {
+          name: name.trim() || "object",
+          target_faces: targetFaces,
+          length: length.trim(),
+          width: width.trim(),
+          height: height.trim(),
+          split,
+          object_hint: hint.trim(),
+          backend,
+          smooth_iterations: smooth,
+          texture,
+          segmentation,
+          web_export: webExport,
+          texture_size: textureSize,
+          max_parts: maxParts,
+          octree_resolution: octree,
+          multiview,
+          bake_normals: bakeNormals,
+          normal_res: normalRes,
+          bake_location: bakeLocation,
+          gpu_host: vm.host,
+        });
+        refreshJobs();
+        go({ kind: "job", id: res.job_id });
+      } catch (err) {
+        toast("fail", "Could not start the build", err instanceof Error ? err.message : "");
+        setBusy(false);
+      }
+      return;
+    }
+
     if (photos.length === 0) {
       toast("warn", "No photos", "Add at least one photo to start a job.");
       return;
@@ -377,12 +481,63 @@ export function NewJobRoute() {
   return (
     <form onSubmit={submit} className="mx-auto max-w-[1400px] px-5 py-6">
       <h1 className="font-mono text-[12px] uppercase tracking-widest text-ink-dim">
-        New job
+        {rerunOf ? "Rerun job" : "New job"}
       </h1>
+      {rerunOf && (
+        <p className="mt-1 font-mono text-[11px] text-ink-faint">
+          Reviewing the settings from{" "}
+          <a href={href({ kind: "job", id: rerunOf })} className="text-accent underline">
+            {plan?.name ?? rerunOf}
+          </a>
+          . Nothing runs until you press start.
+        </p>
+      )}
+      {planError && (
+        <p className="mt-3 rounded-panel border border-fail-edge bg-fail-wash px-3 py-2 font-mono text-[11px] text-fail">
+          {planError}
+        </p>
+      )}
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_22rem]">
         <div className="space-y-4">
-          <PhotoDrop photos={photos} onChange={setPhotos} />
+          {reusingPhotos ? (
+            <div className="rounded-panel border border-rule bg-panel/40 p-4">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-ink-faint">
+                photos
+              </div>
+              <p className="mt-1 font-mono text-[12px] text-ink-dim">
+                Reusing {plan?.photo_count ?? 0} photo
+                {plan?.photo_count === 1 ? "" : "s"} from the original job — no
+                re-upload needed.
+              </p>
+              <ul className="mt-2 space-y-0.5">
+                {(plan?.photos ?? []).slice(0, 8).map((f) => (
+                  <li key={f} className="truncate font-mono text-[11px] text-ink-faint">
+                    {f}
+                  </li>
+                ))}
+                {(plan?.photos.length ?? 0) > 8 && (
+                  <li className="font-mono text-[11px] text-ink-faint">
+                    …and {(plan?.photos.length ?? 0) - 8} more
+                  </li>
+                )}
+              </ul>
+              {plan && !plan.has_settings && (
+                <p className="mt-3 font-mono text-[11px] leading-relaxed text-warn">
+                  That job predates settings being saved, so the options below
+                  are this form's defaults rather than the ones it actually
+                  used. Check them before starting.
+                </p>
+              )}
+              {plan && !plan.can_rerun && (
+                <p className="mt-3 font-mono text-[11px] leading-relaxed text-fail">
+                  This job cannot be rerun: its photos are no longer on disk.
+                </p>
+              )}
+            </div>
+          ) : (
+            <PhotoDrop photos={photos} onChange={setPhotos} />
+          )}
 
           {multiview && taggedCount < 2 && (
             <p className="font-mono text-[11px] leading-relaxed text-warn">
@@ -621,17 +776,19 @@ export function NewJobRoute() {
 
           <motion.button
             type="submit"
-            disabled={busy || photos.length === 0}
+            disabled={busy || !canSubmit}
             whileHover={reduced || busy ? undefined : { scale: 1.02 }}
             whileTap={reduced || busy ? undefined : { scale: 0.98 }}
             transition={snap}
             className="w-full rounded-panel border border-accent-dim bg-accent-wash px-3 py-2.5 font-mono text-[12px] uppercase tracking-widest text-accent hover:bg-accent hover:text-void disabled:opacity-40"
           >
             {busy
-              ? progress < 1
-                ? `uploading ${Math.round(progress * 100)}%`
-                : "starting…"
-              : "start pipeline"}
+              ? rerunOf || progress >= 1
+                ? "starting…"
+                : `uploading ${Math.round(progress * 100)}%`
+              : rerunOf
+                ? "start build"
+                : "start pipeline"}
           </motion.button>
 
           {busy && (
