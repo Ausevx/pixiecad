@@ -141,15 +141,30 @@ def finish_model(
                 from ..generative.hunyuan_remote import texture_mesh
 
                 log("Texturing on GPU host (about 2 minutes)...")
+                before_faces = len(mesh.faces)
                 textured = texture_mesh(
                     _executor(options.gpu_host),
                     glb_path,
                     conditioning_image,
                     out_dir / "texture",
+                    # Without this the paint stage remeshes to its hardcoded
+                    # 40,000 faces and we publish that, so enabling texturing
+                    # silently discarded the face budget the user chose.
+                    simplify_target=options.total_budget or None,
                 )
                 # Replace the published model in place so downstream stages and
                 # the download endpoint need no special-casing.
                 mesh = trimesh.load(textured, force="mesh", process=False)
+                after_faces = len(mesh.faces)
+                if after_faces < before_faces * 0.9:
+                    # Say it rather than let someone compare face counts and
+                    # wonder. The paint stage owns this number, so we report
+                    # the loss instead of pretending it did not happen.
+                    report.warnings.append(
+                        f"texturing remeshed {before_faces:,} faces down to "
+                        f"{after_faces:,}"
+                    )
+                    log(f"WARNING: {report.warnings[-1]}")
                 mesh.export(glb_path)
                 report.textured = True
                 report.steps.append("texture")

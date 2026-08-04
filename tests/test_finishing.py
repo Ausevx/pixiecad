@@ -128,3 +128,53 @@ class TestFinishModel:
         assert not FinishOptions().needs_gpu
         assert FinishOptions(texture=True).needs_gpu
         assert FinishOptions(segmentation="semantic").needs_gpu
+
+
+class TestTexturingKeepsTheFaceBudget:
+    """Texturing must not silently discard the face budget.
+
+    Hunyuan's paint stage remeshes before texturing, hardcoded to 40,000
+    faces, and finish_model publishes that mesh as the model. So a job that
+    asked for 200,000 faces, decimated to exactly 200,000 and exported them,
+    came back with 40,000 the moment texturing was switched on -- with nothing
+    in the log to say so.
+    """
+
+    def test_the_budget_is_passed_to_the_paint_stage(self):
+        from pixiecad.generative.hunyuan_remote import build_texture_script
+
+        script = build_texture_script(simplify_target=200000)
+        assert "HUNYUAN_SIMPLIFY_TARGET=200000" in script
+
+    def test_no_target_leaves_upstream_behaviour_alone(self):
+        """Absent means the image keeps its own 40,000 default."""
+        from pixiecad.generative.hunyuan_remote import build_texture_script
+
+        assert "HUNYUAN_SIMPLIFY_TARGET" not in build_texture_script()
+
+    def test_the_env_var_precedes_the_image_name(self):
+        """docker run flags must come before the image, or they are passed to
+        the container as arguments instead of to docker."""
+        from pixiecad.generative.hunyuan_remote import build_texture_script
+
+        script = build_texture_script(simplify_target=123456)
+        assert script.index("HUNYUAN_SIMPLIFY_TARGET") < script.index("python /work/")
+
+    def test_finishing_asks_for_the_job_budget(self):
+        """FinishOptions.total_budget is the number the user chose."""
+        import inspect
+
+        from pixiecad.web import finishing
+
+        src = inspect.getsource(finishing.finish_model)
+        assert "simplify_target=options.total_budget" in src
+
+    def test_a_remesh_loss_is_reported(self):
+        """If the paint stage shrinks it anyway, that must reach the warnings
+        rather than leaving someone to compare face counts and guess."""
+        import inspect
+
+        from pixiecad.web import finishing
+
+        src = inspect.getsource(finishing.finish_model)
+        assert "texturing remeshed" in src

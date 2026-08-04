@@ -72,6 +72,14 @@ RUN pip install --no-cache-dir fast_simplification \
 RUN sed -i 's/courent.simplify_quadric_decimation(target_count)/courent.simplify_quadric_decimation(face_count=target_count)/' \
       /opt/hunyuan/hy3dpaint/utils/simplify_mesh_utils.py \
  && grep -q 'face_count=target_count' /opt/hunyuan/hy3dpaint/utils/simplify_mesh_utils.py
+
+# The remesh target is hardcoded to 40000, and we publish the remeshed mesh as
+# the model -- so texturing silently overrode whatever face budget the user
+# chose. Make it read HUNYUAN_SIMPLIFY_TARGET so the caller decides, keeping
+# 40000 as the default when nothing is passed.
+RUN sed -i "s/def mesh_simplify_trimesh(inputpath, outputpath, target_count=40000):/import os\ndef mesh_simplify_trimesh(inputpath, outputpath, target_count=None):\n    if target_count is None:\n        target_count = int(os.environ.get('HUNYUAN_SIMPLIFY_TARGET', '40000'))/" \
+      /opt/hunyuan/hy3dpaint/utils/simplify_mesh_utils.py \
+ && grep -q 'HUNYUAN_SIMPLIFY_TARGET' /opt/hunyuan/hy3dpaint/utils/simplify_mesh_utils.py
  && python -c "import fast_simplification; print('fast_simplification import OK')"
 # realesrgan pulls basicsr, which imports torchvision.transforms.functional_tensor
 # -- removed from torchvision years ago, so the import dies on any current

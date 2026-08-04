@@ -146,13 +146,23 @@ def build_texture_script(
     image_name: str = "00.png",
     max_views: int = 6,
     resolution: int = 512,
+    simplify_target: int | None = None,
 ) -> str:
-    """Shell script that textures ``mesh_name`` into ``out/textured.glb``."""
+    """Shell script that textures ``mesh_name`` into ``out/textured.glb``.
+
+    ``simplify_target`` is the face budget the textured mesh comes back at.
+    Hunyuan's paint stage remeshes before texturing, hardcoded to 40,000 faces,
+    and we then publish that mesh as the model -- so a job that asked for
+    200,000 faces, decimated to exactly 200,000 and exported them, silently
+    ended up with 40,000 the moment texturing was enabled. The image is patched
+    to read HUNYUAN_SIMPLIFY_TARGET; passing it keeps the user's budget.
+    """
     return (
         "set -e\n"
         "mkdir -p out\n"
         "docker run --rm --gpus all "
-        '-v "$PWD":/work '
+        + (f"-e HUNYUAN_SIMPLIFY_TARGET={int(simplify_target)} " if simplify_target else "")
+        + '-v "$PWD":/work '
         '-v "$HOME/.cache/huggingface":/root/.cache/huggingface '
         '-v "$HOME/.cache/hy3dgen":/root/.cache/hy3dgen '
         '-v "$HOME/.u2net":/root/.u2net '
@@ -177,6 +187,7 @@ def texture_mesh(
     docker_image: str = DEFAULT_PAINT_IMAGE,
     max_views: int = 6,
     resolution: int = 512,
+    simplify_target: int | None = None,
     timeout_s: int = 3600,
 ) -> Path:
     """Texture an existing mesh on the GPU host; returns the textured GLB.
@@ -212,6 +223,7 @@ def texture_mesh(
                     image_name=img_name,
                     max_views=max_views,
                     resolution=resolution,
+                    simplify_target=simplify_target,
                 ),
             ],
             inputs=[
