@@ -88,6 +88,20 @@ du -sh "$HOME/.cache/huggingface" "$HOME/.cache/hy3dgen" 2>/dev/null || echo "  
 #
 # Both are baked into images built from scratch by setup_hunyuan_vm.sh. This
 # block exists for images baked before that, which cannot be un-baked.
+# Every container runs as root, so anything docker creates inside a mounted
+# cache is root-owned -- and a machine image bakes that ownership in. The
+# TRELLIS path then fails writing its HF token to ~/.cache/huggingface as the
+# SSH user, with "Permission denied" and no hint that ownership is the cause.
+# Cheap to correct at launch, so it is corrected at launch.
+echo "fixing cache ownership ..."
+gcloud compute ssh "$NAME" --project="$PROJECT" --zone="$ZONE" --quiet --command='
+for d in ~/.cache/huggingface ~/.cache/hy3dgen ~/.u2net; do
+  [ -e "$d" ] || continue
+  sudo chown -R "$USER":"$USER" "$d" 2>/dev/null || true
+done
+echo "  caches owned by $USER"
+' || echo "WARNING: could not fix cache ownership; the TRELLIS backend may fail"
+
 echo "checking worker image dependencies ..."
 gcloud compute ssh "$NAME" --project="$PROJECT" --zone="$ZONE" --quiet --command='
 check_dep() {
