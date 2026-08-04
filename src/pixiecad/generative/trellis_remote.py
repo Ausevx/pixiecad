@@ -344,14 +344,24 @@ class RemoteTrellisBackend:
         executor: Executor,
         *,
         image: str = DEFAULT_TRELLIS_IMAGE,
-        timeout_s: int = 3600,
+        # None means "read PIXIECAD_TRELLIS_TIMEOUT, else 90 minutes". A
+        # default argument would freeze the env var at import time, so setting
+        # it in the process that later constructs the backend would do
+        # nothing -- silently, which is the worst way for a timeout to be
+        # wrong.
+        timeout_s: int | None = None,
     ) -> None:
         self.executor = executor
         self.image = image
         # Budget for the whole remote step. A cold VM spends most of it before
         # any generation starts: pulling an ~9 GB image and downloading model
         # weights. Once warm, the same call is minutes.
-        self.timeout_s = timeout_s
+        # 90 minutes, not 60. Generation is minutes; the tail is UV
+        # parameterisation, which on an awkward mesh runs far longer than
+        # anything about the sampling would suggest.
+        self.timeout_s = timeout_s if timeout_s is not None else int(
+            os.environ.get("PIXIECAD_TRELLIS_TIMEOUT", "5400")
+        )
 
     def available(self) -> bool:
         """Check the remote host is reachable and its GPU can run this image."""
@@ -433,8 +443,23 @@ class RemoteTrellisBackend:
                 # Leave room inside the job budget for boot and for rsyncing
                 # the result back, so the worker's own timeout trips first and
                 # reports a real error instead of ssh dying mid-stream.
-                ready_timeout_s=max(300, self.timeout_s // 2),
-                generate_timeout_s=max(300, self.timeout_s // 2 - 180),
+                #
+                # The split used to be 50/50, which made sense when readiness
+                # meant pulling a 25 GB image and downloading 19 GB of weights.
+                # From a baked image that takes about two minutes, so half the
+                # budget sat reserved for something already done -- and the
+                # generate half was what ran out.
+                #
+                # It ran out on work that had already succeeded. A real job:
+                # generation_elapsed_sec 127.15, then xatlas spent 25 more
+                # minutes parameterising a 1.87M face mesh into 1748 charts,
+                # and the 1620 s ceiling killed a finished mesh mid-unwrap.
+                # Unwrap cost tracks topology, not face count, so no fixed
+                # number derived from "generation takes ~2 minutes" is safe.
+                ready_timeout_s=min(1800, max(300, self.timeout_s // 4)),
+                generate_timeout_s=max(
+                    600, self.timeout_s - min(1800, max(300, self.timeout_s // 4)) - 300
+                ),
                 options=options,
             )
 

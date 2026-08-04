@@ -466,3 +466,59 @@ class TestGatedEncoderDecision:
         tr.gate_is_open()
         tr.gate_is_open()
         assert len(calls) <= 1
+
+
+class TestTimeoutBudget:
+    """The generate window has to fit the unwrap, not just the sampling.
+
+    A real job died on this: generation_elapsed_sec was 127.15, then xatlas
+    spent 25 minutes parameterising a 1.87M face mesh into 1748 charts, and a
+    1620 s ceiling killed a mesh that already existed. The old split reserved
+    half the budget for readiness -- correct when that meant pulling 25 GB,
+    wrong once the image is baked and readiness takes two minutes.
+    """
+
+    @staticmethod
+    def _split(total: int) -> tuple[int, int]:
+        ready = min(1800, max(300, total // 4))
+        return ready, max(600, total - ready - 300)
+
+    def test_generation_gets_most_of_the_budget(self):
+        ready, gen = self._split(5400)
+        assert gen > ready * 2, "readiness is fast from a baked image; generate is not"
+
+    def test_the_window_beats_the_run_that_failed(self):
+        """1847 s of real work must fit, with room for a worse unwrap."""
+        _, gen = self._split(5400)
+        assert gen > 1847, f"generate window {gen}s is under the run that already failed"
+
+    def test_curl_cannot_outlive_the_ssh_job(self):
+        """curl gets generate+120. If that exceeds the job timeout, ssh dies
+        first and the error says nothing about what actually went wrong."""
+        for total in (3600, 5400, 7200):
+            _, gen = self._split(total)
+            assert gen + 120 < total, f"curl would outlive the job at {total}s"
+
+    def test_a_small_budget_still_leaves_a_usable_window(self):
+        _, gen = self._split(900)
+        assert gen >= 600
+
+    def test_the_default_is_ninety_minutes(self, monkeypatch):
+        from pixiecad.generative.trellis_remote import RemoteTrellisBackend
+
+        monkeypatch.delenv("PIXIECAD_TRELLIS_TIMEOUT", raising=False)
+        assert RemoteTrellisBackend(object()).timeout_s == 5400
+
+    def test_the_env_var_is_read_when_the_backend_is_built(self, monkeypatch):
+        """Not at import time. A frozen default would ignore an override set
+        by the process that constructs the backend, and do it silently."""
+        from pixiecad.generative.trellis_remote import RemoteTrellisBackend
+
+        monkeypatch.setenv("PIXIECAD_TRELLIS_TIMEOUT", "9000")
+        assert RemoteTrellisBackend(object()).timeout_s == 9000
+
+    def test_an_explicit_value_beats_the_env(self, monkeypatch):
+        from pixiecad.generative.trellis_remote import RemoteTrellisBackend
+
+        monkeypatch.setenv("PIXIECAD_TRELLIS_TIMEOUT", "9000")
+        assert RemoteTrellisBackend(object(), timeout_s=1200).timeout_s == 1200
