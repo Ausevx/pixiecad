@@ -1107,12 +1107,19 @@ class TestBackendSelection:
         assert first["key"] == "auto"
         assert first["requires"] is None
 
-    def test_unvalidated_backends_are_flagged(self, client):
-        """A backend that has never produced a model here must say so, rather
-        than letting someone spend a GPU hour finding out."""
+    def test_validation_reflects_what_has_actually_run(self, client):
+        """`validated` means "this produced a model on this project", so it is
+        only ever flipped by a real run.
+
+        hunyuan-remote: 969,088 faces. trellis-remote: 1,915,811 faces and
+        textured in one pass, 2026-08-04, once the DINOv3 licence was
+        approved. Anything that has not run must still report False so nobody
+        spends a GPU hour finding out."""
         by_key = {b["key"]: b for b in client.get("/api/backends").json()["backends"]}
         assert by_key["hunyuan-remote"]["validated"] is True
-        assert by_key["trellis-remote"]["validated"] is False
+        assert by_key["trellis-remote"]["validated"] is True
+        for b in client.get("/api/backends").json()["backends"]:
+            assert isinstance(b["validated"], bool)
 
     def test_auto_is_translated_to_no_backend(self, client):
         """'auto' is the dashboard's word; the pipeline spells it None. Passing

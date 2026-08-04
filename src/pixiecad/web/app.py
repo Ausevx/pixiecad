@@ -1512,12 +1512,13 @@ def create_app(root: Path) -> FastAPI:
                     "key": "trellis-remote",
                     "label": "TRELLIS.2",
                     "requires": "gpu_host",
-                    "validated": False,
+                    "validated": True,
                     "note": (
-                        "Never completed a run on this project. Needs an L4 "
-                        "specifically (the image ships Ada-only kernels), a "
-                        "64 GB host, and a Hugging Face token for its gated "
-                        "DINOv3 encoder. Expect to debug it."
+                        "1.9M faces and textured in one pass, where Hunyuan "
+                        "needs a separate texturing stage. Slower, and needs "
+                        "an L4 specifically (Ada-only kernels), a 64 GB host "
+                        "and an approved DINOv3 licence. First run on a fresh "
+                        "VM pays ~11 min for a 25 GB image pull."
                     ),
                 },
             ],
