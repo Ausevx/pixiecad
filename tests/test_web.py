@@ -1180,13 +1180,33 @@ class TestBakeLocation:
         assert d["bake_location_resolved"] == "local"
 
     def test_unmeasured_stages_are_flagged_not_invented(self, client):
-        """Remote baking has never run end to end; it must say so rather than
-        show a fabricated duration next to the measured ones."""
-        d = client.get("/api/stage-costs?bake=true&bake_location=host&has_host=true").json()
+        """A figure that was never measured must not be invented to fill a gap.
+
+        Host baking has been timed at 1024 only. Any other resolution has to
+        report no duration rather than scale the 1024 number, because the cost
+        is dominated by transfer and container start, which do not scale with
+        resolution the way the local bake does.
+        """
+        d = client.get(
+            "/api/stage-costs?bake=true&normal_res=2048"
+            "&bake_location=host&has_host=true"
+        ).json()
         bake = next(s for s in d["stages"] if s["key"] == "bake")
         assert bake["seconds"] is None
         assert bake["basis"] == "estimated"
         assert d["has_unmeasured"] is True
+
+    def test_a_measured_host_bake_reports_its_time(self, client):
+        """1024 on the host HAS been run end to end, so it must say so."""
+        d = client.get(
+            "/api/stage-costs?bake=true&normal_res=1024"
+            "&bake_location=host&has_host=true"
+        ).json()
+        bake = next(s for s in d["stages"] if s["key"] == "bake")
+        assert bake["basis"] == "measured"
+        assert bake["seconds"] == 45.5
+        # Still free to this machine, which is the whole reason to choose it.
+        assert bake["peak_ram_mb"] == 0
 
     def test_measured_stages_say_measured(self, client):
         d = client.get("/api/stage-costs?bake=true&normal_res=1024&has_host=false").json()

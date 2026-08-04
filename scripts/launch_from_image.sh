@@ -76,26 +76,42 @@ du -sh "$HOME/.cache/huggingface" "$HOME/.cache/hy3dgen" 2>/dev/null || echo "  
 # of "textures silently do not work".
 #
 # Delete this block once no pre-fix machine images remain.
-echo "checking paint image dependencies ..."
+# Self-healing dependency check, one entry per module an older baked image
+# might be missing. Each of these was found the expensive way -- after a job
+# had already spent GPU minutes generating a mesh -- so they are checked at
+# launch, when a fix costs seconds:
+#
+#   fast_simplification  paint image; trimesh 5 delegates decimation to it
+#   rtree                shape image; trimesh builds its triangle bounds tree
+#                        with it inside ProximityQuery.on_surface, which the
+#                        normal-map bake calls
+#
+# Both are baked into images built from scratch by setup_hunyuan_vm.sh. This
+# block exists for images baked before that, which cannot be un-baked.
+echo "checking worker image dependencies ..."
 gcloud compute ssh "$NAME" --project="$PROJECT" --zone="$ZONE" --quiet --command='
-set -e
-IMG=pixiecad-hunyuan-paint:latest
-if ! sudo docker image inspect "$IMG" >/dev/null 2>&1; then
-  echo "  no paint image on this host; skipping"
-  exit 0
-fi
-if sudo docker run --rm "$IMG" python -c "import fast_simplification" 2>/dev/null; then
-  echo "  fast_simplification present"
-  exit 0
-fi
-echo "  patching $IMG with fast_simplification ..."
-sudo docker rm -f pixiecad-paintfix >/dev/null 2>&1 || true
-sudo docker run --name pixiecad-paintfix "$IMG" \
-  pip install --no-cache-dir --quiet fast_simplification
-sudo docker commit pixiecad-paintfix "$IMG" >/dev/null
-sudo docker rm pixiecad-paintfix >/dev/null
-sudo docker run --rm "$IMG" python -c "import fast_simplification; print(\"  patched OK\")"
-' || echo "WARNING: paint dependency check failed; texturing may not work"
+check_dep() {
+  IMG="$1"; MOD="$2"
+  if ! sudo docker image inspect "$IMG" >/dev/null 2>&1; then
+    echo "  $IMG not on this host; skipping $MOD"
+    return 0
+  fi
+  if sudo docker run --rm "$IMG" python -c "import $MOD" 2>/dev/null; then
+    echo "  $MOD present in $IMG"
+    return 0
+  fi
+  echo "  patching $IMG with $MOD ..."
+  sudo docker rm -f pixiecad-depfix >/dev/null 2>&1 || true
+  sudo docker run --name pixiecad-depfix "$IMG" \
+    pip install --no-cache-dir --quiet "$MOD"
+  sudo docker commit pixiecad-depfix "$IMG" >/dev/null
+  sudo docker rm pixiecad-depfix >/dev/null
+  sudo docker run --rm "$IMG" python -c "import $MOD" \
+    && echo "  $MOD patched OK"
+}
+check_dep pixiecad-hunyuan-paint:latest fast_simplification
+check_dep pixiecad-hunyuan:latest rtree
+' || echo "WARNING: dependency check failed; texturing or baking may not work"
 
 # --project matters: without it this configures whatever the gcloud default
 # happens to be, which silently leaves THIS project's alias pointing at a dead

@@ -489,6 +489,16 @@ def run_build(
     )
 
 
+def _first_line(text: str) -> str:
+    """The actionable line of a traceback-laden error, for a one-line detail.
+
+    A remote failure arrives as an entire remote traceback. The last line is
+    the exception itself, which is the part that says what to fix.
+    """
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    return lines[-1][:160] if lines else str(text)[:160]
+
+
 def _mesh_tail(
     mesh,
     dense_mesh,
@@ -633,45 +643,26 @@ def _mesh_tail(
             warnings=warnings,
         )
 
-    # S6b Bake / Unwrap
+    # S6b Unwrap, then bake.
+    #
+    # Deliberately two steps with different consequences. Unwrapping produces
+    # the UVs the export depends on, so losing it is fatal. Baking only adds a
+    # normal map -- detail the renderer uses and a 3D printer ignores entirely
+    # -- so losing it must NOT be.
+    #
+    # They used to share one try block, and a bake failure discarded the whole
+    # build. That cost a real job 333 s of GPU generation over a missing
+    # module in the worker image: the mesh was finished, correct, and sitting
+    # in memory, and the pipeline threw it away because an optional cosmetic
+    # stage raised. Never again.
     t0 = time.monotonic()
-    normal_map = None
     try:
         unwrap_res = unwrap_uv(mesh)
         mesh = unwrap_res.mesh
-        if bake and bake_location == "host" and executor is not None:
-            # No local fallback on purpose: choosing the host is a statement
-            # about this machine's memory, so silently baking here anyway
-            # would defeat the point. A failure surfaces as a failed stage.
-            from .meshops.bake_remote import bake_object_space_normals_remote
-
-            normal_map = bake_object_space_normals_remote(
-                executor, dense_mesh, mesh, resolution=normal_res
-            )
-            detail = f"uv unwrapped, baked normal map on host ({normal_res}x{normal_res})"
-        elif bake:
-            normal_map = bake_object_space_normals(dense_mesh, mesh, resolution=normal_res)
-            detail = f"uv unwrapped, baked normal map ({normal_res}x{normal_res})"
-        else:
-            detail = "uv unwrapped (bake disabled)"
-        dt = time.monotonic() - t0
-        stages.append(
-            StageOutcome(
-                name="bake",
-                status="ok",
-                detail=detail,
-                seconds=dt,
-            )
-        )
     except Exception as e:
         dt = time.monotonic() - t0
         stages.append(
-            StageOutcome(
-                name="bake",
-                status="failed",
-                detail=str(e),
-                seconds=dt,
-            )
+            StageOutcome(name="bake", status="failed", detail=f"uv unwrap failed: {e}", seconds=dt)
         )
         _fill_skipped_stages(stages, ["export"])
         return BuildResult(
@@ -681,6 +672,48 @@ def _mesh_tail(
             faces=faces,
             scale_applied=scale_applied,
             warnings=warnings,
+        )
+
+    normal_map = None
+    bake_error: str | None = None
+    if bake:
+        try:
+            if bake_location == "host" and executor is not None:
+                # No local fallback on purpose: choosing the host is a
+                # statement about the local machine's memory, so silently
+                # baking there anyway would defeat the point.
+                from .meshops.bake_remote import bake_object_space_normals_remote
+
+                normal_map = bake_object_space_normals_remote(
+                    executor, dense_mesh, mesh, resolution=normal_res
+                )
+                detail = f"uv unwrapped, baked normal map on host ({normal_res}x{normal_res})"
+            else:
+                normal_map = bake_object_space_normals(
+                    dense_mesh, mesh, resolution=normal_res
+                )
+                detail = f"uv unwrapped, baked normal map ({normal_res}x{normal_res})"
+        except Exception as e:
+            bake_error = str(e)
+            detail = f"uv unwrapped; normal map skipped ({_first_line(bake_error)})"
+    else:
+        detail = "uv unwrapped (bake disabled)"
+
+    dt = time.monotonic() - t0
+    stages.append(
+        StageOutcome(
+            name="bake",
+            # "skipped", not "failed": the build is intact and the model is
+            # about to be exported. Reporting failure here would say the job
+            # died when it did not.
+            status="skipped" if bake_error else "ok",
+            detail=detail,
+            seconds=dt,
+        )
+    )
+    if bake_error:
+        warnings.append(
+            f"normal map not baked, model exported without it: {_first_line(bake_error)}"
         )
 
     # Export

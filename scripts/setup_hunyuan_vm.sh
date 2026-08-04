@@ -72,7 +72,7 @@ RUN pip install --no-cache-dir \
       "numpy<2" scipy pandas \
       transformers==4.46.0 diffusers==0.30.0 accelerate \
       huggingface_hub safetensors einops omegaconf pyyaml configargparse \
-      "trimesh==5.0.0" pygltflib xatlas pymeshlab \
+      "trimesh==5.0.0" pygltflib xatlas pymeshlab rtree \
       opencv-python-headless imageio scikit-image \
       onnxruntime rembg torchdiffeq timm tqdm psutil \
       pytorch-lightning

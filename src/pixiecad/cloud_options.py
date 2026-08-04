@@ -189,6 +189,12 @@ BAKE_LOCAL: dict[int, tuple[float, int]] = {
 # reported as a size and a range rather than as a single fabricated duration.
 BAKE_UPLOAD_MB = 11.7
 
+# Measured 2026-08-04 on a live g2-standard-16, end to end: upload, container
+# start, bake and download. Slower than the same bake locally -- the host CPU
+# is not faster and the round trip is not free -- so the reason to choose it is
+# the memory, not the clock.
+BAKE_HOST_SECONDS: dict[int, float] = {1024: 45.5}
+
 # The dev machine's entire local pipeline outside baking -- ingest, clean,
 # decimate, unwrap, parts export -- measured at 247 MB peak in 1.9 s.
 LOCAL_BASELINE_MB = 247
@@ -205,13 +211,13 @@ def bake_cost(resolution: int, *, where: str) -> StageCost:
             key="bake",
             label=f"normal map {resolution}x{resolution} (host)",
             where="host",
-            seconds=None,
+            seconds=BAKE_HOST_SECONDS.get(resolution),
             peak_ram_mb=0,
-            basis="estimated",
+            basis="measured" if resolution in BAKE_HOST_SECONDS else "estimated",
             detail=(
-                f"{BAKE_UPLOAD_MB:.1f} MB uploaded, then baked on the host's "
-                "CPU. Costs this machine nothing but the transfer. Never run "
-                "end-to-end, so no measured time yet."
+                f"About {BAKE_UPLOAD_MB:.1f} MB uploaded, then baked on the "
+                "host's CPU. Slower in wall time than baking here, but costs "
+                "this machine nothing beyond the transfer."
             ),
         )
     return StageCost(

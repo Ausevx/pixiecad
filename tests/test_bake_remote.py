@@ -152,3 +152,72 @@ def test_payload_is_compressed_float32(tmp_path):
     d = np.load(out)
     assert d["vertices"].dtype == np.float32
     assert d["faces"].dtype == np.int32
+
+
+class TestBakeFailureIsNotFatal:
+    """A failed bake must never discard a finished mesh.
+
+    This is a regression test for a real loss: a worker image missing `rtree`
+    made the remote bake raise, and the pipeline threw away 969k faces of
+    geometry that had just cost 333 s of GPU time. Baking adds a normal map --
+    detail a renderer uses and a 3D printer ignores. It is not worth a build.
+    """
+
+    @staticmethod
+    def _run(tmp_path, *, bake_raises: bool):
+        import trimesh
+
+        from pixiecad import pipeline
+        from pixiecad.spec import ObjectSpec
+        from pixiecad.workspace import Workspace
+
+        ws = Workspace.create(tmp_path / "ws", ObjectSpec(name="thing", target_faces=500))
+        dense = trimesh.creation.icosphere(subdivisions=3)
+
+        if bake_raises:
+            def boom(*a, **kw):
+                raise RuntimeError("No module named 'rtree'")
+
+            original = pipeline.bake_object_space_normals
+            pipeline.bake_object_space_normals = boom
+            try:
+                return pipeline._mesh_tail(
+                    dense.copy(), dense,
+                    ws=ws, spec=ws.spec(), regime=pipeline.Regime.SPARSE_VIEWS,
+                    stages=[], warnings=[], bake=True, normal_res=64,
+                )
+            finally:
+                pipeline.bake_object_space_normals = original
+
+        return pipeline._mesh_tail(
+            dense.copy(), dense,
+            ws=ws, spec=ws.spec(), regime=pipeline.Regime.SPARSE_VIEWS,
+            stages=[], warnings=[], bake=True, normal_res=64,
+        )
+
+    def test_the_model_is_still_exported(self, tmp_path):
+        result = self._run(tmp_path, bake_raises=True)
+        assert result.glb_path, "a failed bake must not cost the user their model"
+        assert Path(result.glb_path).is_file()
+
+    def test_export_is_not_marked_skipped(self, tmp_path):
+        result = self._run(tmp_path, bake_raises=True)
+        export = next(s for s in result.stages if s.name == "export")
+        assert export.status == "ok"
+
+    def test_bake_reports_skipped_not_failed(self, tmp_path):
+        """The build survived, so calling it a failure would misreport the job."""
+        result = self._run(tmp_path, bake_raises=True)
+        bake = next(s for s in result.stages if s.name == "bake")
+        assert bake.status == "skipped"
+        assert "rtree" in bake.detail
+
+    def test_the_reason_reaches_the_warnings(self, tmp_path):
+        result = self._run(tmp_path, bake_raises=True)
+        assert any("normal map not baked" in w and "rtree" in w for w in result.warnings)
+
+    def test_a_working_bake_is_unaffected(self, tmp_path):
+        result = self._run(tmp_path, bake_raises=False)
+        bake = next(s for s in result.stages if s.name == "bake")
+        assert bake.status == "ok"
+        assert result.glb_path and not result.warnings
