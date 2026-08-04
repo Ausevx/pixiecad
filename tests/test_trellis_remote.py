@@ -387,3 +387,82 @@ def test_multiview_needs_two_views_to_be_worth_it(tmp_path: Path) -> None:
         GenerateRequest(images=[only_front]), tmp_path / "out"
     )
     assert res.metadata["mode"] == "single"
+
+
+class TestGatedEncoderDecision:
+    """Whether TRELLIS.2 runs with real DINOv3 is decided by asking, not guessing.
+
+    The flag it replaced defaulted to "avoid the gated repo" because approval
+    was pending. Approval then landed and the flag did not, so the encoder the
+    model was actually trained against kept being silently swapped for DINOv2 --
+    a quality loss with nothing in the log to explain it.
+    """
+
+    @staticmethod
+    def _fresh(monkeypatch, *, token=None, status=200, boom=False):
+        from pixiecad.generative import trellis_remote as tr
+
+        monkeypatch.setattr(tr, "_gate_cache", None, raising=False)
+        monkeypatch.delenv("PIXIECAD_TRELLIS_DINOV3", raising=False)
+        if token is None:
+            monkeypatch.delenv("HF_TOKEN", raising=False)
+        else:
+            monkeypatch.setenv("HF_TOKEN", token)
+
+        class _Res:
+            def __init__(self): self.status = status
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(req, timeout=0):
+            if boom:
+                raise OSError("network is down")
+            return _Res()
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        return tr
+
+    def test_an_approved_token_opens_the_gate(self, monkeypatch):
+        tr = self._fresh(monkeypatch, token="hf_x", status=200)
+        assert tr.gate_is_open() is True
+        assert tr.use_gated_dinov3() is True
+
+    def test_an_unapproved_token_does_not(self, monkeypatch):
+        """403 is what a token without access to THIS repo returns."""
+        tr = self._fresh(monkeypatch, token="hf_x", status=403)
+        assert tr.gate_is_open() is False
+
+    def test_no_token_means_no_gate(self, monkeypatch):
+        tr = self._fresh(monkeypatch, token=None)
+        assert tr.gate_is_open() is False
+
+    def test_a_failed_check_fails_closed(self, monkeypatch):
+        """If the check itself cannot run, degrade to DINOv2 rather than die.
+        A worse encoder beats no model at all."""
+        tr = self._fresh(monkeypatch, token="hf_x", boom=True)
+        assert tr.gate_is_open() is False
+
+    def test_the_override_still_wins_both_ways(self, monkeypatch):
+        """A network check has to be overridable when it is the thing wrong."""
+        tr = self._fresh(monkeypatch, token=None)
+        monkeypatch.setenv("PIXIECAD_TRELLIS_DINOV3", "1")
+        assert tr.use_gated_dinov3() is True
+
+        tr = self._fresh(monkeypatch, token="hf_x", status=200)
+        monkeypatch.setenv("PIXIECAD_TRELLIS_DINOV3", "0")
+        assert tr.use_gated_dinov3() is False
+
+    def test_the_result_is_cached(self, monkeypatch):
+        """One request per process: this runs before every TRELLIS job."""
+        tr = self._fresh(monkeypatch, token="hf_x", status=200)
+        calls = []
+        real = __import__("urllib.request").request.urlopen
+
+        def counting(req, timeout=0):
+            calls.append(1)
+            return real(req, timeout=timeout)
+
+        monkeypatch.setattr("urllib.request.urlopen", counting)
+        tr.gate_is_open()
+        tr.gate_is_open()
+        assert len(calls) <= 1

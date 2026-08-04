@@ -253,16 +253,56 @@ def use_gated_dinov3() -> bool:
     the intended encoder: TRELLIS.2 was trained against DINOv3 features, so
     the substitution costs quality in exchange for being able to run at all.
 
-    Opting back in is explicit rather than inferred from the presence of a
-    token, because holding a token is not the same as having been approved for
-    this particular repo -- and guessing wrong means discovering a 401 after
-    19 GB has already downloaded.
+    Holding a token is not the same as having been approved for this repo, and
+    guessing wrong means discovering a 401 after 19 GB has already downloaded.
+    So rather than inferring approval from a token, or making the user set a
+    flag that goes stale the moment approval lands, this asks Hugging Face.
+
+    PIXIECAD_TRELLIS_DINOV3 still forces the answer either way, because a
+    network check has to be overridable when it is the thing that is wrong.
     """
-    return os.environ.get("PIXIECAD_TRELLIS_DINOV3", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    override = os.environ.get("PIXIECAD_TRELLIS_DINOV3", "").strip().lower()
+    if override in {"1", "true", "yes"}:
+        return True
+    if override in {"0", "false", "no"}:
+        return False
+    return gate_is_open()
+
+
+_gate_cache: bool | None = None
+
+
+def gate_is_open(timeout_s: float = 10.0) -> bool:
+    """True when HF_TOKEN can actually fetch the gated DINOv3 repo.
+
+    One cheap request against a 1 KB file, cached for the process. The
+    alternative -- letting the worker find out -- costs a 19 GB download and
+    several minutes of model loading before the 401 surfaces.
+
+    Fails closed. If the check itself cannot complete (no token, no network,
+    HF down) the answer is False, so the run proceeds with ungated DINOv2
+    rather than dying: a degraded encoder beats no model at all.
+    """
+    global _gate_cache
+    if _gate_cache is not None:
+        return _gate_cache
+
+    token = os.environ.get("HF_TOKEN", "").strip()
+    if not token:
+        _gate_cache = False
+        return False
+
+    import urllib.error
+    import urllib.request
+
+    url = f"https://huggingface.co/{GATED_REPO}/resolve/main/config.json"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as res:
+            _gate_cache = res.status == 200
+    except Exception:
+        _gate_cache = False
+    return _gate_cache
 
 
 def resolve_hf_token() -> str | None:
