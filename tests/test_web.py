@@ -1,6 +1,8 @@
 """Tests for PixieCAD web dashboard FastAPI app."""
 
+import json
 import sys
+import time
 import types
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1246,3 +1248,104 @@ class TestBakeLocation:
         while time.time() < deadline and not captured:
             time.sleep(0.05)
         assert captured.get("bake_location") == "local"
+
+
+class TestRerun:
+    """A finished or failed job can be run again without re-entering anything.
+
+    The jobs this exists for failed on infrastructure -- an unreachable GPU
+    host, a module missing from the worker image -- where nothing about the
+    photos or the options was wrong. Making someone re-upload and re-pick a
+    dozen settings to retry is pure toil.
+    """
+
+    @staticmethod
+    def _finished_job(client, **form):
+        data = {"name": "reruns", "target_faces": "5000", **form}
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(40), "image/jpeg"))],
+            data=data,
+        )
+        assert res.status_code == 200
+        job_id = res.json()["job_id"]
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            j = client.get(f"/api/jobs/{job_id}").json()
+            if j["status"] in ("done", "failed"):
+                return job_id, j
+            time.sleep(0.05)
+        raise AssertionError("job never reached a terminal state")
+
+    def test_rerun_creates_a_new_job(self, client):
+        job_id, _ = self._finished_job(client)
+        res = client.post(f"/api/jobs/{job_id}/rerun")
+        assert res.status_code == 200
+        new_id = res.json()["job_id"]
+        assert new_id != job_id
+        assert res.json()["rerun_of"] == job_id
+
+    def test_the_original_is_left_intact(self, client):
+        """The failed run's log is the evidence for why it failed; a retry
+        that overwrote it would destroy what you want to compare against."""
+        job_id, before = self._finished_job(client)
+        client.post(f"/api/jobs/{job_id}/rerun")
+        after = client.get(f"/api/jobs/{job_id}").json()
+        assert after["status"] == before["status"]
+        assert after["log"] == before["log"]
+
+    def test_the_photos_are_reused(self, client):
+        job_id, original = self._finished_job(client)
+        new_id = client.post(f"/api/jobs/{job_id}/rerun").json()["job_id"]
+        new_job = client.get(f"/api/jobs/{new_id}").json()
+        assert new_job["dir"] != original["dir"], "must be its own session"
+        src = list((Path(original["dir"]) / "input").iterdir())
+        dst = list((Path(new_job["dir"]) / "input").iterdir())
+        assert len(dst) == len(src) == 1
+        assert Path(original["dir"]).is_dir(), "the original session must survive"
+
+    def test_settings_carry_over(self, client):
+        job_id, _ = self._finished_job(
+            client, split="false", texture_size="512", normal_res="512",
+            bake_location="local", object_hint="a lighter",
+        )
+        new_id = client.post(f"/api/jobs/{job_id}/rerun").json()["job_id"]
+        meta = json.loads(
+            (Path(client.get(f"/api/jobs/{new_id}").json()["dir"]) / "session.json").read_text()
+        )
+        s = meta["settings"]
+        assert s["split"] is False
+        assert s["texture_size"] == 512
+        assert s["normal_res"] == 512
+        assert s["bake_location"] == "local"
+        assert s["object_hint"] == "a lighter"
+        assert s["rerun_of"] == job_id
+
+    def test_a_newly_provisioned_host_overrides_the_stale_one(self, client):
+        """Usually the reason for the retry: there was no host, now there is."""
+        job_id, _ = self._finished_job(client)
+        new_id = client.post(
+            f"/api/jobs/{job_id}/rerun", data={"gpu_host": "fresh.host.invalid"}
+        ).json()["job_id"]
+        meta = json.loads(
+            (Path(client.get(f"/api/jobs/{new_id}").json()["dir"]) / "session.json").read_text()
+        )
+        assert meta["settings"]["gpu_host"] == "fresh.host.invalid"
+
+    def test_rerunning_a_missing_job_is_404(self, client):
+        assert client.post("/api/jobs/nope/rerun").status_code == 404
+
+    def test_settings_are_persisted_for_restored_jobs(self, tmp_path):
+        """A job restored after a restart must still be rerunnable -- the
+        in-memory record is gone, so the settings have to come off disk."""
+        client = TestClient(create_app(tmp_path))
+        job_id, original = self._finished_job(client, object_hint="a lighter")
+
+        restored = TestClient(create_app(tmp_path))
+        j = restored.get(f"/api/jobs/{job_id}").json()
+        assert j.get("restored") is True
+        new_id = restored.post(f"/api/jobs/{job_id}/rerun").json()["job_id"]
+        meta = json.loads(
+            (Path(restored.get(f"/api/jobs/{new_id}").json()["dir"]) / "session.json").read_text()
+        )
+        assert meta["settings"]["object_hint"] == "a lighter"

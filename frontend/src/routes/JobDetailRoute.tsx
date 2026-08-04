@@ -5,12 +5,13 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { LogPanel } from "@/components/LogPanel";
 import { ModelViewerLazy } from "@/components/ModelViewerLazy";
 import { PipelineTrack } from "@/components/PipelineTrack";
-import { deleteJob, formatBytes, formatCount, optimizeJob } from "@/lib/api";
+import { deleteJob, formatBytes, formatCount, optimizeJob, rerunJob } from "@/lib/api";
 import { useReducedMotion } from "@/lib/hooks";
 import { jobLayoutId, snap } from "@/lib/motion";
 import { refreshJobs } from "@/lib/jobs";
 import { go, href } from "@/lib/router";
 import { useJob } from "@/lib/useJob";
+import { useVm } from "@/lib/vm";
 import { isTerminal, type JobStatus } from "@/lib/types";
 import { toast } from "@/shell/toast";
 
@@ -128,9 +129,60 @@ function Reoptimise({ jobId, faces }: { jobId: string; faces: number }) {
   );
 }
 
+/** Re-run a finished or failed job with the same photos and settings.
+ *
+ *  Only offered once the job is terminal — rerunning something still going
+ *  would start a second copy competing for the same GPU. The rerun gets its
+ *  own id and session, so this navigates rather than mutating the current
+ *  view: the original's log stays intact to compare against.
+ */
+function RerunJob({
+  jobId,
+  status,
+  gpuHost,
+}: {
+  jobId: string;
+  status: JobStatus | undefined;
+  gpuHost?: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  const reduced = useReducedMotion();
+
+  if (!status || !isTerminal(status)) return null;
+
+  async function run() {
+    setBusy(true);
+    try {
+      const res = await rerunJob(jobId, gpuHost);
+      refreshJobs();
+      toast("ok", "Rerun started", "Same photos and settings, new job.");
+      go({ kind: "job", id: res.job_id });
+    } catch (err) {
+      toast("fail", "Could not rerun", err instanceof Error ? err.message : "");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <motion.button
+      type="button"
+      onClick={run}
+      disabled={busy}
+      whileHover={reduced || busy ? undefined : { scale: 1.03 }}
+      whileTap={reduced || busy ? undefined : { scale: 0.97 }}
+      transition={snap}
+      title="Start a new job from this one's photos and settings"
+      className="rounded-sharp border border-accent-edge bg-accent-wash px-2.5 py-1 font-mono text-[11px] text-accent disabled:opacity-50"
+    >
+      {busy ? "starting…" : "↻ rerun"}
+    </motion.button>
+  );
+}
+
 export function JobDetailRoute({ jobId }: { jobId: string }) {
   const { job, log, files, loading, notFound, error } = useJob(jobId);
   const reduced = useReducedMotion();
+  const vm = useVm();
 
   if (notFound) {
     return (
@@ -185,6 +237,7 @@ export function JobDetailRoute({ jobId }: { jobId: string }) {
               {!isTerminal(job.status) && job.stage ? ` · ${job.stage}` : ""}
             </motion.span>
           )}
+          <RerunJob jobId={jobId} status={job?.status} gpuHost={vm.host} />
           <DeleteJob jobId={jobId} running={job?.status === "running"} />
         </div>
       </div>

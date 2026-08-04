@@ -166,6 +166,9 @@ def _rehydrate_jobs(root: Path) -> dict[str, dict[str, Any]]:
             "warnings": [],
             "stages": [],
             "restored": True,
+            # Absent for sessions predating settings persistence; a rerun of
+            # those falls back to defaults rather than refusing.
+            "settings": meta.get("settings") or {},
         }
 
     return restored
@@ -778,7 +781,29 @@ def create_app(root: Path) -> FastAPI:
         # that the backend falls back to single-view regardless.
         use_multiview = multiview and len(used_tags) >= 2
 
-        session.write_meta(job_id=job_id, name=spec.name, target_faces=target_faces)
+        # Everything a rerun needs, on disk rather than only in memory. The
+        # in-memory record dies with the process, but a job that failed on
+        # infrastructure -- an unreachable host, a missing module in the worker
+        # image -- is exactly the one you want to retry after a restart, and
+        # re-picking a dozen options by hand is not a retry.
+        settings = {
+            "mode": mode,
+            "split": split,
+            "object_hint": hint_val,
+            "backend": backend_val,
+            "length": length,
+            "width": width,
+            "height": height,
+            "octree_resolution": gen_options["octree_resolution"],
+            "multiview": use_multiview,
+            **dataclasses.asdict(finish),
+        }
+        session.write_meta(
+            job_id=job_id,
+            name=spec.name,
+            target_faces=target_faces,
+            settings=settings,
+        )
 
         job_info: dict[str, Any] = {
             "job_id": job_id,
@@ -801,6 +826,7 @@ def create_app(root: Path) -> FastAPI:
             "split": split,
             "object_hint": hint_val,
             "backend": backend_val,
+            "settings": settings,
             "finish": {
                 "smooth_iterations": finish.smooth_iterations,
                 "texture": finish.texture,
@@ -815,6 +841,30 @@ def create_app(root: Path) -> FastAPI:
             "web_url": None,
         }
 
+        return _register_and_dispatch(
+            job_info, job_dir, target_faces, backend_val, split, hint_val,
+            finish, gen_options, use_multiview,
+        )
+
+    def _register_and_dispatch(
+        job_info: dict[str, Any],
+        job_dir: Path,
+        target_faces: int,
+        backend_val: str | None,
+        split: bool,
+        hint_val: str | None,
+        finish: FinishOptions,
+        gen_options: dict[str, Any],
+        use_multiview: bool,
+    ) -> dict[str, Any]:
+        """Publish a job and start it, honouring the GPU-provisioning gate.
+
+        Shared by create_job and rerun so the two cannot drift. The gate in
+        particular is not something to reimplement: a job that needs a GPU and
+        is submitted while one is still building has to wait, or it dies on a
+        missing docker image.
+        """
+        job_id = job_info["job_id"]
         with lock:
             jobs[job_id] = job_info
             provision_running = provisioning.get("status") == "running"
@@ -843,6 +893,126 @@ def create_app(root: Path) -> FastAPI:
 
         threading.Thread(target=_job_worker, args=worker_args, daemon=True).start()
         return {"job_id": job_id}
+
+    @app.post("/api/jobs/{job_id}/rerun")
+    def rerun_job(job_id: str, gpu_host: str | None = Form(None)):
+        """Start a fresh job from an existing one's photos and settings.
+
+        A new session rather than a reset of the old one. The failed run's log
+        and stage timings are the evidence for why it failed, and overwriting
+        them to retry would destroy exactly what you would want to compare
+        against. Photos are copied, as they are for any upload -- the input
+        folder is the session's own, so the original stays intact.
+
+        The common case this exists for is infrastructure, not input: an
+        unreachable GPU host, a module missing from the worker image. Nothing
+        about the photos or the options was wrong, so re-entering them by hand
+        is pure toil.
+        """
+        with lock:
+            original = jobs.get(job_id)
+            if original is None:
+                raise HTTPException(404, "job not found")
+            if original.get("status") in ("running", "queued"):
+                raise HTTPException(
+                    409, "this job is still running; wait for it to finish or fail"
+                )
+            src_dir = Path(original["dir"])
+            settings = dict(original.get("settings") or {})
+            name = original.get("name") or "object"
+            target_faces = int(original.get("target_faces") or 20000)
+
+        src_photos = src_dir / "input"
+        if not src_photos.is_dir() or not any(src_photos.iterdir()):
+            raise HTTPException(
+                409,
+                "the original job's photos are gone, so it cannot be rerun; "
+                "start a new job instead",
+            )
+
+        session = new_session(root, label=name)
+        new_id = uuid4().hex[:8]
+        # stage_inputs copies, and the staged names already carry any view tags
+        # applied at upload, so tagging survives the rerun untouched.
+        staged = session.stage_inputs(src_photos)
+
+        # Declared dimensions are the only scale reference a generative mesh
+        # has, so dropping them on a rerun would silently change the result.
+        dims = Dimensions.parse(
+            length=(settings.get("length") or None),
+            width=(settings.get("width") or None),
+            height=(settings.get("height") or None),
+        )
+        spec = ObjectSpec(name=name, target_faces=target_faces, dimensions=dims)
+        Workspace.create(session.work_dir / "ws", spec)
+
+        # A host may have been provisioned since the original failed -- that is
+        # frequently the whole reason for the retry -- so an explicitly supplied
+        # one wins over the stale value recorded then.
+        host = (gpu_host or "").strip() or settings.get("gpu_host") or None
+        finish = FinishOptions(
+            smooth_iterations=int(settings.get("smooth_iterations", 0)),
+            texture=bool(settings.get("texture", False)),
+            segmentation=str(settings.get("segmentation", "auto")),
+            web_export=bool(settings.get("web_export", False)),
+            texture_size=int(settings.get("texture_size", 1024)),
+            max_parts=max(1, int(settings.get("max_parts", 8))),
+            total_budget=target_faces,
+            gpu_host=host,
+            bake_normals=bool(settings.get("bake_normals", True)),
+            normal_res=max(256, min(2048, int(settings.get("normal_res", 1024)))),
+            bake_location=str(settings.get("bake_location", "auto")),
+        )
+        gen_options = {
+            "octree_resolution": max(64, int(settings.get("octree_resolution", 256)))
+        }
+        new_settings = {**settings, "gpu_host": host, "rerun_of": job_id}
+        session.write_meta(
+            job_id=new_id, name=name, target_faces=target_faces, settings=new_settings
+        )
+
+        job_info: dict[str, Any] = {
+            "job_id": new_id,
+            "name": name,
+            "target_faces": target_faces,
+            "status": "queued",
+            "stage": "queued",
+            "log": [
+                f"Rerun of job {job_id} with the same {len(staged)} photo(s) "
+                "and settings.",
+            ],
+            "report": None,
+            "glb_url": None,
+            "dir": str(session.root),
+            "regime": None,
+            "faces": None,
+            "parts": [],
+            "parts_dir": None,
+            "warnings": [],
+            "stages": [],
+            "created_at": session.created_at,
+            "mode": settings.get("mode", "auto"),
+            "split": bool(settings.get("split", True)),
+            "object_hint": settings.get("object_hint"),
+            "backend": settings.get("backend"),
+            "settings": new_settings,
+            "finish": dataclasses.asdict(finish),
+            "web_url": None,
+            "rerun_of": job_id,
+        }
+
+        res = _register_and_dispatch(
+            job_info,
+            session.root,
+            target_faces,
+            settings.get("backend"),
+            bool(settings.get("split", True)),
+            settings.get("object_hint"),
+            finish,
+            gen_options,
+            bool(settings.get("multiview", False)),
+        )
+        return {**res, "rerun_of": job_id}
 
     @app.get("/api/jobs")
     def list_jobs():

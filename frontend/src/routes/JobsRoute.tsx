@@ -1,9 +1,13 @@
 import { AnimatePresence, motion } from "motion/react";
+import type React from "react";
 import { useMemo, useState } from "react";
-import { href } from "@/lib/router";
+import { go, href } from "@/lib/router";
 import { jobLayoutId, listItemVariants, listVariants, signatures, snap } from "@/lib/motion";
-import { useJobs } from "@/lib/jobs";
+import { refreshJobs, useJobs } from "@/lib/jobs";
 import { useReducedMotion } from "@/lib/hooks";
+import { rerunJob } from "@/lib/api";
+import { useVm } from "@/lib/vm";
+import { toast } from "@/shell/toast";
 import { isTerminal, type JobStatus, type JobSummary } from "@/lib/types";
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -43,11 +47,15 @@ function JobRow({ job }: { job: JobSummary }) {
 
   return (
     <motion.li variants={listItemVariants} layout exit="exit">
+      {/* The row is a link, so the rerun control has to be a SIBLING of the
+          anchor rather than inside it: a button nested in an <a> is invalid
+          markup and every click on it would also navigate. */}
+      <div className="group flex items-center border-b border-rule transition-colors hover:bg-raised">
       <motion.a
         href={href({ kind: "job", id: job.job_id })}
         whileHover={reduced ? undefined : { x: 2 }}
         transition={snap}
-        className="group flex items-center gap-4 border-b border-rule px-4 py-3 transition-colors hover:bg-raised"
+        className="flex min-w-0 flex-1 items-center gap-4 px-4 py-3"
       >
         <motion.span
           aria-hidden="true"
@@ -89,7 +97,51 @@ function JobRow({ job }: { job: JobSummary }) {
           ›
         </span>
       </motion.a>
+
+      {isTerminal(job.status) && (
+        <RerunRow jobId={job.job_id} name={job.name} />
+      )}
+      </div>
     </motion.li>
+  );
+}
+
+/** Rerun straight from the list, without opening the job first.
+ *
+ *  Always rendered rather than revealed on hover: a hover-only control is
+ *  invisible to keyboard and touch, and this is the fastest path back after a
+ *  run that failed on infrastructure rather than on anything the user chose.
+ */
+function RerunRow({ jobId, name }: { jobId: string; name: string }) {
+  const [busy, setBusy] = useState(false);
+  const vm = useVm();
+
+  async function run(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setBusy(true);
+    try {
+      const res = await rerunJob(jobId, vm.host);
+      refreshJobs();
+      toast("ok", "Rerun started", `${name} — same photos and settings.`);
+      go({ kind: "job", id: res.job_id });
+    } catch (err) {
+      toast("fail", "Could not rerun", err instanceof Error ? err.message : "");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={run}
+      disabled={busy}
+      aria-label={`Rerun ${name}`}
+      title="Start a new job from this one's photos and settings"
+      className="mr-3 shrink-0 rounded-sharp border border-rule px-2 py-1 font-mono text-[11px] text-ink-faint transition-colors hover:border-accent-edge hover:text-accent disabled:opacity-50"
+    >
+      {busy ? "…" : "↻"}
+    </button>
   );
 }
 

@@ -232,3 +232,22 @@ export const getStageCosts = (
     ).toString()}`,
     { signal },
   );
+
+/** Start a fresh job from an existing one's photos and settings.
+ *
+ *  Returns the NEW job's id — the original is untouched, so its log stays
+ *  available to compare against. `gpu_host` overrides the host recorded on the
+ *  original, which matters because "there is a host now" is the usual reason
+ *  to retry at all. */
+export function rerunJob(jobId: string, gpuHost?: string): Promise<{
+  job_id: string;
+  status?: string;
+  rerun_of: string;
+}> {
+  const body = new FormData();
+  if (gpuHost) body.append("gpu_host", gpuHost);
+  return request(`/api/jobs/${encodeURIComponent(jobId)}/rerun`, {
+    method: "POST",
+    body,
+  });
+}
