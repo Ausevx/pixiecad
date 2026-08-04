@@ -95,6 +95,7 @@ def _run_generative(
     bake: bool,
     normal_res: int,
     bake_location: str = "local",
+    solidify_generated: bool = True,
     split: bool = False,
     max_parts: int = 8,
     object_hint: str | None = None,
@@ -155,6 +156,46 @@ def _run_generative(
         "Geometry is generated, not measured: surfaces no camera saw are "
         "plausible inventions."
     )
+
+    # Some backends return a surface sample rather than a body. A TRELLIS mesh
+    # measured here: 40,341 disconnected patches, 609,689 open edges, enclosing
+    # 1.8% of its own convex hull -- the right silhouette made of confetti,
+    # with no interior. It reads as "a hollow mesh of polygons", and decimating
+    # it only rearranges the fragments, so this has to happen before the mesh
+    # tail rather than after.
+    #
+    # Only when the mesh is actually shattered: Hunyuan already encloses
+    # 0.42-0.88 of its hull and is left untouched, verified against real output
+    # from both backends.
+    if solidify_generated:
+        t_solid = time.monotonic()
+        try:
+            from .meshops.solidify import solidify
+
+            outcome = solidify(mesh)
+            if outcome.applied:
+                mesh = outcome.mesh
+                warnings.append(
+                    f"generated surface was not a solid "
+                    f"({outcome.components_before:,} disconnected pieces "
+                    f"enclosing {outcome.fill_before:.2f} of its hull); "
+                    f"rebuilt as a watertight body ({outcome.fill_after:.2f})"
+                )
+            stages.append(
+                StageOutcome(
+                    "solidify",
+                    "ok" if outcome.applied else "skipped",
+                    outcome.reason,
+                    time.monotonic() - t_solid,
+                )
+            )
+        except Exception as e:
+            # Never fatal: an unrepaired mesh is still a mesh, and the sanity
+            # check below will say what is wrong with it.
+            stages.append(
+                StageOutcome("solidify", "skipped", f"solidify failed: {e}",
+                             time.monotonic() - t_solid)
+            )
 
     # Structural sanity: a failed generation still yields a valid, correctly
     # budgeted, UV-mapped glTF -- it is just not an object. Every numeric check
@@ -235,6 +276,7 @@ def run_build(
     bake: bool = True,
     normal_res: int = 1024,
     bake_location: str = "local",
+    solidify_generated: bool = True,
     generative_backend: str | None = None,
     split: bool = False,
     max_parts: int = 8,
@@ -323,6 +365,7 @@ def run_build(
             bake=bake,
             normal_res=normal_res,
             bake_location=bake_location,
+            solidify_generated=solidify_generated,
             split=split,
             max_parts=max_parts,
             object_hint=object_hint,
