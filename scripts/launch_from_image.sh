@@ -20,10 +20,22 @@ PROJECT="${4:-${PIXIECAD_GCP_PROJECT:-$(gcloud config get-value project 2>/dev/n
 
 # Same guardrail as provision_gpu_vm.sh: a forgotten GPU VM is the expensive
 # failure mode, so it hard-stops itself even if nobody tears it down.
+#
+# Two hours suits a Hunyuan job, which is minutes of work on a warm image. It
+# does NOT suit a cold TRELLIS run: ~9 GB image pull plus ~19 GB of weights
+# before any compute starts. maxRunDuration cannot be raised on a running
+# instance, and the action is DELETE, so an underestimate here does not stall
+# the job -- it destroys the VM mid-download and throws the whole 28 GB away.
+# Hence configurable, with the old value as the default.
+MAX_RUN_SECONDS="${PIXIECAD_MAX_RUN_SECONDS:-7200}"
+# Shut down from inside a little early, so the graceful path wins the race
+# against the hard delete.
+INNER_SLEEP=$(( MAX_RUN_SECONDS - 600 ))
+
 STARTUP=$(mktemp)
-cat > "$STARTUP" <<'EOF'
+cat > "$STARTUP" <<EOF
 #!/bin/bash
-(sleep 6600 && shutdown -h now) &
+(sleep ${INNER_SLEEP} && shutdown -h now) &
 EOF
 
 ONDEMAND_FLAGS=()
@@ -32,12 +44,13 @@ if [ "${PIXIECAD_ONDEMAND:-0}" != "1" ]; then
 fi
 
 echo "launching '$NAME' from machine image '$IMAGE' ..."
+echo "  hard stop after ${MAX_RUN_SECONDS}s (override with PIXIECAD_MAX_RUN_SECONDS)"
 gcloud compute instances create "$NAME" \
   --project="$PROJECT" \
   --zone="$ZONE" \
   --source-machine-image="$IMAGE" \
   --metadata-from-file=startup-script="$STARTUP" \
-  --max-run-duration=7200s \
+  --max-run-duration="${MAX_RUN_SECONDS}s" \
   --instance-termination-action=DELETE \
   "${ONDEMAND_FLAGS[@]}" \
   --quiet
