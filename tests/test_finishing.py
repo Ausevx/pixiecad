@@ -178,3 +178,49 @@ class TestTexturingKeepsTheFaceBudget:
 
         src = inspect.getsource(finishing.finish_model)
         assert "texturing remeshed" in src
+
+
+class TestCachedWeightsAreAuthoritative:
+    """A job must not phone Hugging Face for weights already on the disk.
+
+    The weights are baked into the machine image so a run never downloads
+    them. But huggingface_hub does not treat a full cache as sufficient --
+    snapshot_download contacts the Hub to resolve the revision on every call.
+    A Hub CDN 500 therefore killed a job that needed nothing from the Hub,
+    after generation and solidify had already succeeded.
+    """
+
+    def test_texturing_runs_offline_by_default(self, monkeypatch):
+        from pixiecad.generative.hunyuan_remote import build_texture_script
+
+        monkeypatch.delenv("PIXIECAD_HF_ONLINE", raising=False)
+        assert "HF_HUB_OFFLINE=1" in build_texture_script()
+
+    def test_generation_runs_offline_by_default(self, monkeypatch):
+        from pixiecad.generative.hunyuan_remote import build_hunyuan_script
+
+        monkeypatch.delenv("PIXIECAD_HF_ONLINE", raising=False)
+        assert "HF_HUB_OFFLINE=1" in build_hunyuan_script()
+
+    def test_the_trellis_worker_runs_offline_by_default(self, monkeypatch):
+        from pixiecad.generative.trellis_remote import docker_run_command
+
+        monkeypatch.delenv("PIXIECAD_HF_ONLINE", raising=False)
+        assert "HF_HUB_OFFLINE=1" in docker_run_command()
+
+    def test_it_can_be_turned_off_to_add_a_model(self, monkeypatch):
+        """Offline has to be escapable, or fetching something genuinely new
+        becomes impossible."""
+        from pixiecad.generative.hunyuan_remote import build_texture_script
+
+        monkeypatch.setenv("PIXIECAD_HF_ONLINE", "1")
+        assert "HF_HUB_OFFLINE" not in build_texture_script()
+
+    def test_the_flag_precedes_the_image_name(self, monkeypatch):
+        """docker run flags after the image are passed to the container as
+        arguments, not to docker."""
+        from pixiecad.generative.hunyuan_remote import build_texture_script
+
+        monkeypatch.delenv("PIXIECAD_HF_ONLINE", raising=False)
+        script = build_texture_script()
+        assert script.index("HF_HUB_OFFLINE") < script.index("python /work/")

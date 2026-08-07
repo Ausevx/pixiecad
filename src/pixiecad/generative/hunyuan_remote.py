@@ -126,7 +126,8 @@ def build_hunyuan_script(
         # between jobs. hy3dgen keeps its own cache separate from HuggingFace's,
         # and missing it means every --rm run re-downloads the whole model.
         "docker run --rm --gpus all "
-        '-v "$PWD":/work '
+        + hf_offline_flag()
+        + '-v "$PWD":/work '
         '-v "$HOME/.cache/huggingface":/root/.cache/huggingface '
         '-v "$HOME/.cache/hy3dgen":/root/.cache/hy3dgen '
         '-v "$HOME/.u2net":/root/.u2net '
@@ -137,6 +138,34 @@ def build_hunyuan_script(
 
 DEFAULT_PAINT_IMAGE = "pixiecad-hunyuan-paint:latest"
 _TEXTURE_SCRIPT = Path(__file__).parent / "remote_scripts" / "hunyuan_texture.py"
+
+
+def hf_offline_flag() -> str:
+    """``-e HF_HUB_OFFLINE=1`` unless the caller explicitly wants the network.
+
+    The weights are baked into the machine image precisely so a job never
+    downloads them. But huggingface_hub does not treat a full cache as
+    sufficient: ``snapshot_download`` contacts the Hub to resolve the revision
+    on every call, even when every file is already present. So a Hugging Face
+    outage broke a job that needed nothing from Hugging Face --
+
+      ConnectionError: HTTP status server error (500 Internal Server Error),
+      domain: https://us.aws.cdn.hf.co/xorbs/default/2a0a6c2...
+
+    -- after generation and solidify had already succeeded. Offline mode makes
+    the cache authoritative, which is what having a cache was supposed to mean.
+    Verified against the baked image: the paint weights resolve from cache with
+    no network at all.
+
+    PIXIECAD_HF_ONLINE=1 turns it off, for adding a model the image lacks. A
+    cold cache under offline mode fails immediately and says what is missing,
+    which beats silently pulling 19 GB at the GPU rate.
+    """
+    import os
+
+    if os.environ.get("PIXIECAD_HF_ONLINE", "").strip().lower() in {"1", "true", "yes"}:
+        return ""
+    return "-e HF_HUB_OFFLINE=1 "
 
 
 def build_texture_script(
@@ -161,6 +190,7 @@ def build_texture_script(
         "set -e\n"
         "mkdir -p out\n"
         "docker run --rm --gpus all "
+        + hf_offline_flag()
         + (f"-e HUNYUAN_SIMPLIFY_TARGET={int(simplify_target)} " if simplify_target else "")
         + '-v "$PWD":/work '
         '-v "$HOME/.cache/huggingface":/root/.cache/huggingface '

@@ -111,8 +111,15 @@ def docker_run_command(
     # facebook/dinov3-* is gated:"manual" -- a human at Meta approves each
     # request, so without this a build is blocked on someone else's inbox.
     gated_env = "-e TRELLIS2_AVOID_GATED_DEPS=1 " if avoid_gated else ""
+    # Same reasoning as the Hunyuan path: the weights are baked in, but
+    # huggingface_hub still calls out to resolve revisions and a Hub outage
+    # then breaks a job that needs nothing from the Hub. The cache is meant to
+    # be the answer, so let it be. PIXIECAD_HF_ONLINE=1 opts out.
+    from .hunyuan_remote import hf_offline_flag
+
     return (
         f"docker run -d --name {CONTAINER_NAME} --gpus all {gated_env}"
+        f"{hf_offline_flag()}"
         # Deliberately NOT --restart unless-stopped. Loading the model needs
         # ~15 GB of host RAM; on an undersized VM the kernel OOM-kills it, and
         # a restart policy turns that into a silent respawn loop that burns the
