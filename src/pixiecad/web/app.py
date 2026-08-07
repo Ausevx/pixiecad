@@ -193,6 +193,31 @@ def _latest_machine_image() -> str:
         return ""
 
 
+def _actual_zone(name: str, requested: str, project: str) -> str:
+    """Where the instance really is, which is not always where it was asked for.
+
+    L4 capacity runs out per-zone, so launch_from_image.sh sweeps siblings on a
+    stockout and the VM can land somewhere other than the requested zone. The
+    ssh alias config-ssh writes is name.zone.project, so trusting the request
+    builds an alias that does not resolve -- and the failure surfaces much
+    later as "backend not available", pointing at the backend rather than at
+    the zone.
+    """
+    try:
+        res = subprocess.run(
+            ["gcloud", "compute", "instances", "list",
+             f"--filter=name={name}", "--format=value(zone)"]
+            + ([f"--project={project}"] if project else []),
+            capture_output=True, text=True, timeout=60,
+        )
+        found = (res.stdout or "").strip().splitlines()
+        if found and found[0].strip():
+            return found[0].strip()
+    except Exception:
+        pass
+    return requested
+
+
 def _gcp_project() -> str:
     """Project id from the environment, falling back to the gcloud config."""
     project = os.environ.get("PIXIECAD_GCP_PROJECT", "").strip()
@@ -1674,7 +1699,13 @@ def create_app(root: Path) -> FastAPI:
                     # the project the alias does not resolve at all, so an
                     # unset env var must fall back to the gcloud config rather
                     # than silently producing a two-part name.
-                    provisioning["host"] = f"{req.name}.{req.zone}.{project}" if project else ""
+                    landed = _actual_zone(req.name, req.zone, project)
+                    if landed != req.zone:
+                        provisioning["log"].append(
+                            f"no L4 capacity in {req.zone}; launched in {landed}"
+                        )
+                    provisioning["zone"] = landed
+                    provisioning["host"] = f"{req.name}.{landed}.{project}" if project else ""
                     if not project:
                         provisioning["log"].append(
                             "WARNING: could not determine GCP project; set "

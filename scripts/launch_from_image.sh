@@ -43,18 +43,61 @@ if [ "${PIXIECAD_ONDEMAND:-0}" != "1" ]; then
   ONDEMAND_FLAGS=(--provisioning-model=SPOT --instance-termination-action=DELETE)
 fi
 
+# L4 capacity runs out per-zone, and when it does the request fails outright:
+#
+#   ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS ... reason: stockout
+#
+# That is not quota and not a bad request -- the zone simply has no L4 left,
+# and asia-southeast1-b (the zone every earlier run used) hit it. Since the
+# error is indistinguishable from a hard failure to anyone reading the log,
+# sweep instead: try the requested zone first, then its siblings, and say
+# which one won. Paying ~4x for on-demand to dodge a stockout is the wrong
+# trade when a neighbouring zone usually has stock.
+CANDIDATE_ZONES=("$ZONE")
+for z in "${PIXIECAD_ZONE_SWEEP:-asia-southeast1-a asia-southeast1-b asia-southeast1-c asia-south1-a asia-south1-b asia-south1-c}"; do
+  for zz in $z; do
+    [ "$zz" = "$ZONE" ] || CANDIDATE_ZONES+=("$zz")
+  done
+done
+
 echo "launching '$NAME' from machine image '$IMAGE' ..."
 echo "  hard stop after ${MAX_RUN_SECONDS}s (override with PIXIECAD_MAX_RUN_SECONDS)"
-gcloud compute instances create "$NAME" \
-  --project="$PROJECT" \
-  --zone="$ZONE" \
-  --source-machine-image="$IMAGE" \
-  --metadata-from-file=startup-script="$STARTUP" \
-  --max-run-duration="${MAX_RUN_SECONDS}s" \
-  --instance-termination-action=DELETE \
-  "${ONDEMAND_FLAGS[@]}" \
-  --quiet
+
+LAUNCHED=""
+for z in "${CANDIDATE_ZONES[@]}"; do
+  echo "  trying $z ..."
+  if OUT=$(gcloud compute instances create "$NAME" \
+      --project="$PROJECT" \
+      --zone="$z" \
+      --source-machine-image="$IMAGE" \
+      --metadata-from-file=startup-script="$STARTUP" \
+      --max-run-duration="${MAX_RUN_SECONDS}s" \
+      --instance-termination-action=DELETE \
+      "${ONDEMAND_FLAGS[@]}" \
+      --quiet 2>&1); then
+    ZONE="$z"
+    LAUNCHED=yes
+    echo "  launched in $ZONE"
+    break
+  fi
+  if echo "$OUT" | grep -q "ZONE_RESOURCE_POOL_EXHAUSTED\|stockout"; then
+    echo "    no L4 capacity in $z, trying the next zone"
+    continue
+  fi
+  # Anything else -- quota, permissions, a bad image name -- is not going to
+  # be fixed by moving zones, so fail loudly rather than sweeping through
+  # every zone printing the same error six times.
+  echo "$OUT" >&2
+  rm -f "$STARTUP"
+  exit 1
+done
 rm -f "$STARTUP"
+
+if [ -z "$LAUNCHED" ]; then
+  echo "no L4 capacity in any candidate zone: ${CANDIDATE_ZONES[*]}" >&2
+  echo "retry later, or set PIXIECAD_ONDEMAND=1 to pay list price for guaranteed stock" >&2
+  exit 1
+fi
 
 echo "waiting for sshd ..."
 for _ in $(seq 1 30); do

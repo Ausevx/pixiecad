@@ -1455,3 +1455,49 @@ class TestTargetFaceCeiling:
                 data={"name": "bad", "target_faces": bad},
             )
             assert res.status_code >= 400, f"target_faces={bad} must be rejected"
+
+
+class TestZoneStockoutHandling:
+    """L4 capacity runs out per-zone, so a VM may not land where it was asked.
+
+    asia-southeast1-b -- the zone every earlier run used -- returned
+    ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS / reason: stockout. That is not
+    quota and not a bad request; the zone simply has no L4 left.
+    """
+
+    def test_the_launcher_sweeps_zones(self):
+        src = Path("scripts/launch_from_image.sh").read_text()
+        assert "ZONE_RESOURCE_POOL_EXHAUSTED" in src
+        assert "CANDIDATE_ZONES" in src
+
+    def test_only_stockouts_trigger_the_sweep(self):
+        """Quota, permissions and a bad image name are not fixed by moving
+        zones, so they must fail once rather than six times."""
+        src = Path("scripts/launch_from_image.sh").read_text()
+        sweep = src[src.index("CANDIDATE_ZONES=("):]
+        assert "exit 1" in sweep
+
+    def test_the_host_uses_where_the_vm_actually_landed(self, monkeypatch):
+        """Building the ssh alias from the REQUESTED zone gives a name that
+        does not resolve, and the failure surfaces later as 'backend not
+        available' -- pointing at the backend rather than the zone."""
+        import subprocess as sp
+
+        from pixiecad.web import app as app_module
+
+        class _Res:
+            stdout = "asia-southeast1-a\n"
+
+        monkeypatch.setattr(sp, "run", lambda *a, **k: _Res())
+        assert app_module._actual_zone("vm", "asia-southeast1-b", "proj") == "asia-southeast1-a"
+
+    def test_it_falls_back_to_the_request_when_lookup_fails(self, monkeypatch):
+        import subprocess as sp
+
+        from pixiecad.web import app as app_module
+
+        def boom(*a, **k):
+            raise OSError("gcloud missing")
+
+        monkeypatch.setattr(sp, "run", boom)
+        assert app_module._actual_zone("vm", "asia-southeast1-b", "proj") == "asia-southeast1-b"
