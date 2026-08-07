@@ -101,21 +101,77 @@ def looks_shattered(mesh: trimesh.Trimesh, *, fill_threshold: float = 0.15) -> b
     return fill_ratio(mesh) < fill_threshold
 
 
+#: Faces produced per division squared. Marching cubes triangulates a surface,
+#: so the count grows with the square of the grid resolution, not its cube.
+#:
+#: This is only a starting guess. Measured on real output it is not constant --
+#: about 5.5 below ~150 divisions and 11.5 above, because finer grids resolve
+#: detail the coarse ones smooth away, and it varies per object besides. So the
+#: first pass uses this and then _refine measures what actually came out and
+#: corrects, rather than trusting a number that is wrong half the time.
+FACES_PER_DIVISION_SQ = 11.5
+
+#: 256 costs about 3.4 GB and 20 s. Past that the local memory budget on a
+#: 16 GB machine is the binding constraint, not the mesh.
+MAX_DIVISIONS = 256
+MIN_DIVISIONS = 64
+
+
+def divisions_for_target(target_faces: int | None) -> int:
+    """Grid resolution that yields roughly ``target_faces`` after extraction.
+
+    Solidify replaces the mesh outright, so its resolution sets a ceiling the
+    face budget cannot exceed -- decimation only removes faces. A job that
+    asked for 300,000 came back with 89,844 because the grid was fixed at 128,
+    and nothing downstream could recover the difference.
+    """
+    if not target_faces or target_faces <= 0:
+        return 128
+    est = int((target_faces / FACES_PER_DIVISION_SQ) ** 0.5)
+    return max(MIN_DIVISIONS, min(MAX_DIVISIONS, est))
+
+
 def solidify(
     mesh: trimesh.Trimesh,
     *,
-    divisions: int = 128,
-    dilate: int = 2,
+    divisions: int | None = None,
+    target_faces: int | None = None,
+    dilate: int | None = None,
     only_if_shattered: bool = True,
     fill_threshold: float = 0.15,
+    _retry: bool = True,
 ) -> SolidifyResult:
     """Close a surface into a watertight solid.
 
-    ``divisions`` is resolution along the longest axis; 128 keeps deviation
-    under 1% of object size and runs in seconds. ``dilate`` is how many voxels
-    of gap to bridge -- raise it for a more shattered input, at the cost of
-    filling narrower concavities.
+    ``divisions`` is resolution along the longest axis. Leave it None and pass
+    ``target_faces`` instead: the grid then produces enough geometry for the
+    budget the user actually asked for, since this mesh replaces theirs and
+    decimation downstream can only take faces away.
+
+    ``dilate`` is how many voxels of gap to bridge. Left None it scales with
+    ``divisions`` so the bridged distance stays constant in world units;
+    raise it for a more shattered input, at the cost of filling narrower
+    concavities.
     """
+    if divisions is None:
+        divisions = divisions_for_target(target_faces)
+    if dilate is None:
+        # Dilation must scale with resolution: the gaps are a fixed size in
+        # world units, so bridging them takes more voxels as the voxels shrink.
+        # Holding it at 2 while raising divisions silently stopped sealing the
+        # interior -- fill fell from 0.955 at 128 to 0.093 at 256, straight
+        # back to the hollow mesh this module exists to fix.
+        #
+        # The relationship is not linear, so this is measured rather than
+        # derived. Minimum dilation that seals, by divisions:
+        #
+        #     128 -> 2      160 -> 3      192 -> 3      256 -> 6
+        #
+        # divisions/45 covers all of them with a margin, and over-dilating is
+        # cheap: at 128 divisions everything from d2 to d8 gives the same 0.96
+        # fill. Erosion undoes the size change; what a larger radius does cost
+        # is concavities narrower than itself.
+        dilate = max(2, -(-divisions // 45))
     before_fill = fill_ratio(mesh)
     before_components = count_components(mesh)
 
@@ -159,6 +215,35 @@ def solidify(
     # coordinates, then undo the padding that was added to give room to dilate.
     solid.apply_transform(voxels.transform)
     solid.vertices -= pad * pitch
+
+    # One correction pass. The face count a grid yields varies by object, so
+    # rather than trust the estimate, measure it and rescale from what this
+    # mesh actually produced -- but only when we undershot badly enough to
+    # matter, since overshooting is free (decimation removes the excess).
+    if (
+        target_faces
+        and _retry
+        and len(solid.faces) < target_faces * 0.8
+        and divisions < MAX_DIVISIONS
+    ):
+        observed = len(solid.faces) / (divisions * divisions)
+        if observed > 0:
+            better = int((target_faces / observed) ** 0.5)
+            better = max(divisions + 8, min(MAX_DIVISIONS, better))
+            if better > divisions:
+                return solidify(
+                    mesh,
+                    divisions=better,
+                    target_faces=target_faces,
+                    # dilate=None, NOT the value computed for the old
+                    # resolution: the retry runs at a finer grid, and reusing
+                    # the coarse dilation stops bridging the gaps entirely --
+                    # it put fill back to 0.09, undoing the whole repair.
+                    dilate=None,
+                    only_if_shattered=False,
+                    fill_threshold=fill_threshold,
+                    _retry=False,
+                )
 
     return SolidifyResult(
         mesh=solid,

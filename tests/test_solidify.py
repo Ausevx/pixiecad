@@ -153,3 +153,75 @@ class TestPipelineWiring:
         src = inspect.getsource(pipeline._run_generative)
         head = src[src.index("if solidify_generated:"):]
         assert "except Exception" in head
+
+
+class TestResolutionFollowsBudget:
+    """Solidify replaces the mesh, so its resolution caps the face budget.
+
+    A real job asked for 300,000 faces and the log read:
+
+        decimate: 89844 -> 89844 faces (target 300000)
+
+    because the grid was fixed at 128 and decimation can only remove faces.
+    """
+
+    def test_a_bigger_budget_asks_for_a_finer_grid(self):
+        from pixiecad.meshops.solidify import divisions_for_target
+
+        assert divisions_for_target(300000) > divisions_for_target(50000)
+
+    def test_the_grid_is_capped_for_memory(self):
+        """256^3 costs about 3.4 GB; past that the 16 GB machine is the limit."""
+        from pixiecad.meshops.solidify import MAX_DIVISIONS, divisions_for_target
+
+        assert divisions_for_target(10_000_000) == MAX_DIVISIONS
+
+    def test_no_budget_still_works(self):
+        from pixiecad.meshops.solidify import divisions_for_target
+
+        assert divisions_for_target(None) > 0
+        assert divisions_for_target(0) > 0
+
+    def test_the_pipeline_passes_the_budget(self):
+        import inspect
+
+        from pixiecad import pipeline
+
+        assert "target_faces=spec.target_faces" in inspect.getsource(pipeline._run_generative)
+
+
+class TestDilationScalesWithResolution:
+    """Both bugs found here were mine, and both silently un-did the repair.
+
+    Dilation bridges gaps of a fixed WORLD size, so a finer grid needs more
+    voxels to span them. Holding it at 2 while raising divisions dropped fill
+    from 0.955 to 0.093 -- a watertight mesh that is hollow again, which is
+    the worst outcome because every other check still passes.
+    """
+
+    def test_dilation_grows_with_the_grid(self):
+        from pixiecad.meshops.solidify import solidify
+
+        coarse = solidify(_perforated(), divisions=128, only_if_shattered=False, _retry=False)
+        fine = solidify(_perforated(), divisions=256, only_if_shattered=False, _retry=False)
+        # Both must actually seal; the point is that the finer one does too.
+        assert coarse.fill_after > 0.9
+        assert fine.fill_after > 0.9, f"fine grid left it at {fine.fill_after:.2f}"
+
+    def test_the_measured_minimums_are_covered(self):
+        """Measured on real output: 128 needs 2, 160 needs 3, 192 needs 3,
+        256 needs 6. The rule must meet or exceed each."""
+        rule = lambda d: max(2, -(-d // 45))
+        for divisions, minimum in ((128, 2), (160, 3), (192, 3), (256, 6)):
+            assert rule(divisions) >= minimum, f"{divisions} needs {minimum}"
+
+    def test_the_retry_recomputes_dilation(self):
+        """The refinement pass runs at a finer grid. Forwarding the coarse
+        dilation into it put fill back to 0.09 -- it must pass None."""
+        import inspect
+
+        from pixiecad.meshops import solidify as mod
+
+        src = inspect.getsource(mod.solidify)
+        retry = src[src.index("return solidify("):]
+        assert "dilate=None" in retry

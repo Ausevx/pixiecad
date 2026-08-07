@@ -172,7 +172,11 @@ def _run_generative(
         try:
             from .meshops.solidify import solidify
 
-            outcome = solidify(mesh)
+            # The grid resolution has to follow the face budget: solidify
+            # replaces the mesh, so its output is a ceiling decimation cannot
+            # raise. A job asking for 300,000 came back with 89,844 because
+            # the grid was fixed at 128.
+            outcome = solidify(mesh, target_faces=spec.target_faces)
             if outcome.applied:
                 mesh = outcome.mesh
                 warnings.append(
