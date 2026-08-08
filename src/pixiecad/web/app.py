@@ -283,6 +283,10 @@ def create_app(root: Path) -> FastAPI:
     # Jobs seen this process, seeded from whatever is already on disk so a
     # restart does not orphan finished work.
     jobs: dict[str, dict[str, Any]] = _rehydrate_jobs(root)
+    # Published on app.state as well: it is otherwise a closure local, and the
+    # one-job-per-GPU-host guard cannot be tested without being able to put a
+    # job into the registry without running one. Same dict, not a copy.
+    app.state.jobs = jobs
     # Single in-flight provision: two concurrent builds on one project would
     # race for the same L4 quota of 1 and both fail confusingly.
     provisioning: dict[str, Any] = {}
@@ -902,7 +906,39 @@ def create_app(root: Path) -> FastAPI:
         missing docker image.
         """
         job_id = job_info["job_id"]
+        host = (job_info.get("settings") or {}).get("gpu_host") or None
         with lock:
+            # One GPU host serves one job at a time. The TRELLIS worker holds a
+            # single pipeline on a single device, and sending it a second
+            # generation does not queue -- it DEADLOCKS. Observed: two jobs
+            # submitted 55 s apart both reached "Sampling sparse structure:
+            # 100%" and stopped dead, /ready stopped answering entirely, the
+            # GPU sat at 0% and the process at 0.23 s of CPU per 40 s. Nothing
+            # recovers that but killing the container, and both runs are lost.
+            #
+            # Refusing up front costs the user a message; accepting costs them
+            # both jobs and the GPU minutes already spent. Checked inside the
+            # lock and in the same critical section as registration, so two
+            # near-simultaneous submissions cannot both pass.
+            if host:
+                busy = next(
+                    (
+                        jid
+                        for jid, other in jobs.items()
+                        if jid != job_id
+                        and other.get("status") in {"running", "queued"}
+                        and ((other.get("settings") or {}).get("gpu_host") or None) == host
+                    ),
+                    None,
+                )
+                if busy is not None:
+                    name = jobs[busy].get("name") or busy
+                    raise HTTPException(
+                        409,
+                        f"GPU host {host} is already running job '{name}' ({busy}). "
+                        "It serves one job at a time -- a second one deadlocks the "
+                        "worker and loses both. Wait for it to finish, or cancel it.",
+                    )
             jobs[job_id] = job_info
             provision_running = provisioning.get("status") == "running"
 

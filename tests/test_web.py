@@ -1501,3 +1501,107 @@ class TestZoneStockoutHandling:
 
         monkeypatch.setattr(sp, "run", boom)
         assert app_module._actual_zone("vm", "asia-southeast1-b", "proj") == "asia-southeast1-b"
+
+
+class TestOneJobPerGpuHost:
+    """A GPU host serves one job at a time, and the second one is refused.
+
+    The TRELLIS worker holds a single pipeline on a single device. Sending it a
+    second generation does not queue -- it DEADLOCKS. Observed on 2026-08-08:
+    two jobs submitted 55 seconds apart both reached "Sampling sparse
+    structure: 100%" and stopped dead. /ready stopped answering entirely
+    (HTTP 000 after 20 s), the GPU sat at 0% across samples, and the worker
+    process used 0.23 s of CPU per 40 s. Nothing recovered it but killing the
+    container, and BOTH runs were lost along with their GPU minutes.
+    """
+
+    HOST = "gpu.example.invalid"
+
+    def _job(self, app, *, host, status="running", name="first"):
+        """Put a job straight into the registry, bypassing the worker thread."""
+        from uuid import uuid4
+
+        jid = uuid4().hex[:8]
+        app.state.jobs[jid] = {
+            "job_id": jid,
+            "name": name,
+            "status": status,
+            "settings": {"gpu_host": host},
+            "log": [],
+        }
+        return jid
+
+    def _submit(self, client, *, host):
+        return client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(1), "image/jpeg"))],
+            data={"name": "second", "target_faces": "5000", "gpu_host": host},
+        )
+
+    def test_a_second_job_on_a_busy_host_is_refused(self, tmp_path):
+        app = create_app(tmp_path)
+        client = TestClient(app)
+        self._job(app, host=self.HOST)
+        r = self._submit(client, host=self.HOST)
+        assert r.status_code == 409, r.text
+
+    def test_the_refusal_names_the_job_holding_the_host(self):
+        """"Busy" with no way to find out what is busy just moves the confusion."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            app = create_app(Path(d))
+            client = TestClient(app)
+            jid = self._job(app, host=self.HOST, name="lighter-trellis-v4")
+            r = self._submit(client, host=self.HOST)
+            assert jid in r.text and "lighter-trellis-v4" in r.text
+            assert "deadlock" in r.text.lower()
+
+    def test_a_queued_job_also_holds_the_host(self, tmp_path):
+        """Queued means it will start the moment the GPU is up -- it owns the
+        slot just as much as a running job."""
+        app = create_app(tmp_path)
+        client = TestClient(app)
+        self._job(app, host=self.HOST, status="queued")
+        assert self._submit(client, host=self.HOST).status_code == 409
+
+    def test_a_different_host_is_unaffected(self, tmp_path):
+        app = create_app(tmp_path)
+        client = TestClient(app)
+        self._job(app, host="other.example.invalid")
+        assert self._submit(client, host=self.HOST).status_code != 409
+
+    def test_a_finished_job_releases_the_host(self, tmp_path):
+        app = create_app(tmp_path)
+        client = TestClient(app)
+        for status in ("done", "failed"):
+            app.state.jobs.clear()
+            self._job(app, host=self.HOST, status=status)
+            assert self._submit(client, host=self.HOST).status_code != 409, status
+
+    def test_a_job_with_no_host_is_never_blocked(self, tmp_path):
+        """Local-only work does not touch the worker."""
+        app = create_app(tmp_path)
+        client = TestClient(app)
+        self._job(app, host=self.HOST)
+        r = client.post(
+            "/api/jobs",
+            files=[("files", ("a.jpg", _generate_test_jpeg(1), "image/jpeg"))],
+            data={"name": "local", "target_faces": "5000"},
+        )
+        assert r.status_code != 409, r.text
+
+    def test_rerun_is_gated_too(self, tmp_path):
+        """The deadlock was reached through the rerun button, so guarding only
+        create_job would leave the actual path open."""
+        import inspect
+
+        from pixiecad.web import app as appmod
+
+        src = inspect.getsource(appmod.create_app)
+        register = src[src.index("def _register_and_dispatch"):]
+        register = register[: register.index("@app.get(")]
+        assert "409" in register, (
+            "the guard must live in the shared dispatch, which create_job and "
+            "rerun both go through -- not in create_job alone"
+        )
