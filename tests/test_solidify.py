@@ -310,7 +310,13 @@ class TestCurvedSurfacesAreNotTerraced:
         binary = trimesh.voxel.VoxelGrid(grid).marching_cubes
         field = extract_surface(grid, offset=0, sigma=0.0)
         assert field is not None
-        assert np.allclose(field.bounds, binary.bounds)
+        # Explicit tolerance, not the default. extract_surface nudges the
+        # isovalue by 1e-4 on purpose, which displaces the surface by ~5e-5
+        # voxels; np.allclose's default rtol scales with the coordinates, so on
+        # a small grid like this one it clears by only about 6x and would go
+        # flaky. A twentieth of a voxel is the tolerance that actually matters
+        # here -- it is a half-voxel shift this test exists to catch.
+        assert np.allclose(field.bounds, binary.bounds, atol=0.05)
 
     def test_eroding_away_the_whole_object_is_reported_not_raised(self):
         """marching_cubes raises when the isosurface is outside the field.
@@ -394,3 +400,20 @@ class TestTheWorkerGetsTheFaceBudget:
 
         script = build_trellis_script(options={"decimation_target": 300000})
         assert "decimation_target=300000" in script
+
+    def test_an_unknown_profile_is_refused(self, monkeypatch):
+        """The worker falls back to hd on an unrecognised profile, so a typo
+        would look like it took effect and silently give back hd -- exactly the
+        confusion this knob exists to end."""
+        import pytest
+
+        from pixiecad.pipeline import _generative_defaults
+
+        monkeypatch.setenv("PIXIECAD_TRELLIS_MESH_PROFILE", "gaem_ready")
+        with pytest.raises(ValueError, match="not a profile"):
+            _generative_defaults(None, spec=self._spec(1000))
+
+    def test_the_profile_set_matches_the_worker(self):
+        from pixiecad.generative.trellis_remote import TRELLIS_MESH_PROFILES
+
+        assert TRELLIS_MESH_PROFILES == {"hd", "game_ready"}

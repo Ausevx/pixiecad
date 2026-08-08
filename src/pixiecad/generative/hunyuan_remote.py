@@ -17,6 +17,7 @@ Cloudflare tunnel and uploaded results to a stranger's S3 bucket.
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import tempfile
 import time
@@ -101,13 +102,13 @@ def build_hunyuan_script(
     if views:
         source = [
             "--views views.json",
-            f"--model {opts.get('model', MULTIVIEW_MODEL)}",
-            f"--subfolder {opts.get('subfolder', MULTIVIEW_SUBFOLDER)}",
+            f"--model {shlex.quote(str(opts.get('model', MULTIVIEW_MODEL)))}",
+            f"--subfolder {shlex.quote(str(opts.get('subfolder', MULTIVIEW_SUBFOLDER)))}",
         ]
     else:
         source = [
-            f"--image images/{image_name}",
-            f"--model {opts.get('model', DEFAULT_MODEL)}",
+            f"--image {shlex.quote(f'images/{image_name}')}",
+            f"--model {shlex.quote(str(opts.get('model', DEFAULT_MODEL)))}",
         ]
     flags = [
         *source,
@@ -136,7 +137,11 @@ def build_hunyuan_script(
         "set -e\n"
         "mkdir -p out\n"
         + hf_offline_preamble()
-        + f"hf_run '{command}'\n"
+        # Wrapped in a function, then invoked by NAME. hf_run re-runs it after
+        # clearing $HF_OFFLINE, and a function body is parsed once at
+        # definition -- so the deferred variable still resolves late while
+        # nothing the user supplied is ever re-parsed as shell.
+        + f"_hf_cmd() {{ {command}; }}\nhf_run _hf_cmd\n"
     )
 
 
@@ -145,7 +150,16 @@ _TEXTURE_SCRIPT = Path(__file__).parent / "remote_scripts" / "hunyuan_texture.py
 
 
 # What huggingface_hub says when offline mode meets something it has not got.
-HF_CACHE_MISS = "LocalEntryNotFoundError|HF_HUB_OFFLINE|OfflineModeIsEnabled"
+#
+# Deliberately narrow. A bare "HF_HUB_OFFLINE" was in here and matches any log
+# line that merely mentions the variable -- a startup banner echoing its own
+# environment, or the tail of the error's own "set HF_HUB_OFFLINE=0" advice.
+# A false positive is expensive: it restarts a GPU container to fix a problem
+# that was never a cache miss, and mislabels the real failure while doing it.
+# These three strings only appear when the cache genuinely lacked something.
+HF_CACHE_MISS = (
+    "LocalEntryNotFoundError|OfflineModeIsEnabled|outgoing traffic has been disabled"
+)
 
 
 def hf_offline_enabled() -> bool:
@@ -199,17 +213,27 @@ def hf_offline_preamble() -> str:
     PIXIECAD_HF_ONLINE=1 skips straight to the network.
     """
     offline = 'HF_OFFLINE="-e HF_HUB_OFFLINE=1"' if hf_offline_enabled() else 'HF_OFFLINE=""'
+    # Takes the command as a FUNCTION NAME and re-invokes it with "$@" -- not as
+    # a string to eval. The retry has to re-run the command after clearing
+    # $HF_OFFLINE, and the obvious way to defer that is to eval a string; but
+    # eval RE-PARSES, so a filename reaching it survives one level of quoting
+    # and is then interpreted as shell. Verified against the eval version:
+    # shlex.quote stopped `photo'.glb` (single quotes pair up inside the
+    # literal) yet `photo$(touch /tmp/PWNED).glb` executed, because command
+    # substitution is inert to the first parse and live to the second.
+    # A function body is parsed once, at definition; calling it again re-reads
+    # $HF_OFFLINE without re-reading anything the user supplied.
     return (
         f"{offline}\n"
         "hf_run() {\n"
         "  _hf_log=$(mktemp)\n"
-        '  if eval "$1" >"$_hf_log" 2>&1; then cat "$_hf_log"; rm -f "$_hf_log"; return 0; fi\n'
+        '  if "$@" >"$_hf_log" 2>&1; then cat "$_hf_log"; rm -f "$_hf_log"; return 0; fi\n'
         '  cat "$_hf_log"\n'
         f'  if grep -qE \'{HF_CACHE_MISS}\' "$_hf_log"; then\n'
         '    echo "pixiecad: a model is missing from this host cache; fetching it" >&2\n'
         '    rm -f "$_hf_log"\n'
         '    HF_OFFLINE=""\n'
-        '    eval "$1"\n'
+        '    "$@"\n'
         "    return $?\n"
         "  fi\n"
         '  rm -f "$_hf_log"\n'
@@ -250,7 +274,11 @@ def build_texture_script(
         # job's own inputs or outputs.
         "-w /opt/hunyuan "
         f"{image} python /work/hunyuan_texture.py "
-        f"--mesh /work/{mesh_name} --image /work/images/{image_name} "
+        # Quoted because the suffix comes from the user's file, and a function
+        # body defers EXPANSION to call time even though it is parsed once --
+        # so an unquoted $(...) in a filename would still run.
+        f"--mesh {shlex.quote(f'/work/{mesh_name}')} "
+        f"--image {shlex.quote(f'/work/images/{image_name}')} "
         f"--out /work/out/textured.glb --max-views {int(max_views)} "
         f"--resolution {int(resolution)}"
     )
@@ -258,7 +286,11 @@ def build_texture_script(
         "set -e\n"
         "mkdir -p out\n"
         + hf_offline_preamble()
-        + f"hf_run '{command}'\n"
+        # Wrapped in a function, then invoked by NAME. hf_run re-runs it after
+        # clearing $HF_OFFLINE, and a function body is parsed once at
+        # definition -- so the deferred variable still resolves late while
+        # nothing the user supplied is ever re-parsed as shell.
+        + f"_hf_cmd() {{ {command}; }}\nhf_run _hf_cmd\n"
     )
 
 

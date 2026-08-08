@@ -49,6 +49,13 @@ REMOTE_OUTPUTS_DIR = "/var/tmp/pixiecad-trellis-outputs"
 # Form fields the worker accepts that are worth exposing. Anything else in
 # GenerateRequest.options is ignored rather than blindly forwarded, so a typo
 # can't silently change generation settings.
+# The worker's two mesh presets, mirrored from its own ALLOWED_MESH_PROFILES.
+# It picks "hd" whenever the field is absent or unrecognised -- geometry at
+# 1024, decimation target 2,000,000, textures at 4096 -- which is what every
+# run here used before the field was ever set. "game_ready" is 512, a hard
+# 300,000-face cap, and 2048.
+TRELLIS_MESH_PROFILES = frozenset({"hd", "game_ready"})
+
 PASSTHROUGH_OPTIONS = (
     "mesh_profile",
     "geometry_resolution",

@@ -103,11 +103,24 @@ def _generative_defaults(options: dict | None, *, spec: ObjectSpec) -> dict:
     """
     import os
 
+    from .generative.trellis_remote import TRELLIS_MESH_PROFILES
+
     out = dict(options or {})
     if spec.target_faces:
         out.setdefault("decimation_target", int(spec.target_faces))
     profile = os.environ.get("PIXIECAD_TRELLIS_MESH_PROFILE", "").strip().lower()
     if profile:
+        # Validate rather than forward. The worker silently falls back to its
+        # own default on an unrecognised profile, so a typo would look like it
+        # took effect and quietly give back hd -- the exact confusion this knob
+        # exists to resolve. It also keeps the value shell-safe: options are
+        # interpolated into a curl command as -F "key=value" with no quoting of
+        # the value itself.
+        if profile not in TRELLIS_MESH_PROFILES:
+            raise ValueError(
+                f"PIXIECAD_TRELLIS_MESH_PROFILE={profile!r} is not a profile the "
+                f"worker knows; use one of {sorted(TRELLIS_MESH_PROFILES)}"
+            )
         out.setdefault("mesh_profile", profile)
     return out
 

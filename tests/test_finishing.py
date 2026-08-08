@@ -257,11 +257,16 @@ class TestOfflineFallsBackOnACacheMiss:
     wrapper that never actually retried.
     """
 
+    # The stub reads $HF_OFFLINE from the environment rather than its argv,
+    # exactly as the generated _hf_cmd function does. This is load-bearing:
+    # hf_run re-invokes with "$@", so a caller that expanded the flag at the
+    # call site would hand the retry the SAME flag and never actually go
+    # online -- a bug this harness would hide if it took the flag as an arg.
     PREAMBLE_STUB = """
 attempts=0
 fake() {
   attempts=$((attempts+1))
-  case "$*" in
+  case "$HF_OFFLINE" in
     *HF_HUB_OFFLINE*)
       echo "LocalEntryNotFoundError: Cannot find an appropriate cached snapshot" >&2
       return 1 ;;
@@ -291,7 +296,7 @@ fake() {
         return self._sh("set -e\n" + hf_offline_preamble() + self.PREAMBLE_STUB + body)
 
     def test_a_cache_miss_is_retried_with_the_network(self, monkeypatch):
-        r = self._run("hf_run 'fake $HF_OFFLINE --gpus all'\necho rc=$?", monkeypatch)
+        r = self._run("hf_run fake\necho rc=$?", monkeypatch)
         assert r.returncode == 0, r.stderr
         assert "fetched over the network" in r.stdout
         assert "rc=0" in r.stdout
@@ -299,7 +304,7 @@ fake() {
     def test_the_retry_actually_drops_the_offline_flag(self, monkeypatch):
         """Retrying with the same flags would just fail identically."""
         r = self._run(
-            "hf_run 'fake $HF_OFFLINE --gpus all'\necho attempts=$attempts", monkeypatch
+            "hf_run fake\necho attempts=$attempts", monkeypatch
         )
         assert "attempts=2" in r.stdout
 
@@ -308,7 +313,7 @@ fake() {
         rediscover that would double the GPU bill for nothing."""
         r = self._run(
             "broken() { attempts=$((attempts+1)); echo 'CUDA out of memory' >&2; return 1; }\n"
-            "hf_run 'broken $HF_OFFLINE' || true\necho attempts=$attempts",
+            "hf_run broken || true\necho attempts=$attempts",
             monkeypatch,
         )
         assert "attempts=1" in r.stdout
@@ -316,7 +321,7 @@ fake() {
     def test_an_unrelated_failure_still_fails(self, monkeypatch):
         r = self._run(
             "broken() { echo 'CUDA out of memory' >&2; return 1; }\n"
-            "hf_run 'broken $HF_OFFLINE'\necho SHOULD-NOT-REACH",
+            "hf_run broken\necho SHOULD-NOT-REACH",
             monkeypatch,
         )
         assert "SHOULD-NOT-REACH" not in r.stdout
@@ -326,7 +331,7 @@ fake() {
         """The property offline mode exists for: one attempt, offline, done."""
         r = self._run(
             "cached() { attempts=$((attempts+1)); echo 'loaded from cache'; }\n"
-            "hf_run 'cached $HF_OFFLINE'\necho attempts=$attempts",
+            "hf_run cached\necho attempts=$attempts",
             monkeypatch,
         )
         assert r.returncode == 0
@@ -336,14 +341,14 @@ fake() {
         """hf_run buffers to a file to inspect it; it must still print it, or
         every remote failure becomes undiagnosable."""
         r = self._run(
-            "chatty() { echo 'step 1 of 3'; return 0; }\nhf_run 'chatty $HF_OFFLINE'",
+            "chatty() { echo 'step 1 of 3'; return 0; }\nhf_run chatty",
             monkeypatch,
         )
         assert "step 1 of 3" in r.stdout
 
     def test_online_mode_skips_straight_to_the_network(self, monkeypatch):
         r = self._run(
-            "hf_run 'fake $HF_OFFLINE'\necho attempts=$attempts", monkeypatch, online=True
+            "hf_run fake\necho attempts=$attempts", monkeypatch, online=True
         )
         assert "attempts=1" in r.stdout
         assert "fetched over the network" in r.stdout
@@ -390,3 +395,87 @@ fake() {
         monkeypatch.delenv("PIXIECAD_HF_ONLINE", raising=False)
         for script in (build_texture_script(), build_hunyuan_script(), build_trellis_script()):
             assert script.startswith("set -e\n")
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "m\'.glb",
+            "m\';touch {M};x=\'.glb",
+            "m$(touch {M}).glb",
+            "m`touch {M}`.glb",
+            "m;touch {M};.glb",
+            'm";touch {M};x=".glb',
+        ],
+    )
+    @pytest.mark.parametrize("builder,arg", [("texture", "mesh_name"), ("shape", "image_name")])
+    def test_a_filename_cannot_execute_shell(self, payload, builder, arg, tmp_path):
+        """Filenames are staged as "00<suffix>" and "mesh.glb", but the SUFFIX
+        is the user's, and "photo$(...).glb" is a legal filename.
+
+        Two mistakes were made here in sequence, so both are pinned:
+
+        1. The command was passed to hf_run as a string and ``eval``ed, so it
+           was parsed TWICE. shlex.quote defeats the first parse only --
+           measured, `photo\'.glb` was stopped but `photo$(touch X).glb` ran.
+           hf_run now takes a function NAME and re-invokes it with "$@".
+        2. A function body is parsed once but still EXPANDS at call time, so
+           the arguments themselves must be quoted as well.
+        """
+        import subprocess
+
+        from pixiecad.generative.hunyuan_remote import (
+            build_hunyuan_script,
+            build_texture_script,
+        )
+
+        build = build_texture_script if builder == "texture" else build_hunyuan_script
+        marker = tmp_path / "PWNED"
+        script = build(**{arg: payload.format(M=marker)})
+        # docker is stubbed out; an escaped payload would run regardless.
+        r = subprocess.run(
+            ["sh", "-c", "docker() { :; }\n" + script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert not marker.exists(), f"{payload!r} escaped and executed"
+        assert r.returncode == 0, r.stderr
+
+    def test_the_trellis_restart_is_guarded_against_looping(self, monkeypatch):
+        """Without the guard, a container that keeps dying would be restarted
+        forever: each restart resets tries and continues the wait loop."""
+        from pixiecad.generative.trellis_remote import build_trellis_script
+
+        monkeypatch.delenv("PIXIECAD_HF_ONLINE", raising=False)
+        script = build_trellis_script()
+        for block in script.split("restarting the worker with network access")[:-1]:
+            assert '[ -n "$HF_OFFLINE" ]' in block.rsplit("if ", 1)[-1] or \
+                   '[ -n "$HF_OFFLINE" ]' in block[-400:], "restart is unguarded"
+
+    def test_the_cache_miss_pattern_does_not_match_a_mere_mention(self):
+        """A startup banner echoing HF_HUB_OFFLINE=1, or the error's own advice
+        to 'set HF_HUB_OFFLINE=0', must not trigger an expensive GPU restart."""
+        import re
+
+        from pixiecad.generative.hunyuan_remote import HF_CACHE_MISS
+
+        innocent = [
+            "docker run -e HF_HUB_OFFLINE=1 pixiecad-hunyuan:latest",
+            "[worker] starting with HF_HUB_OFFLINE=1",
+            "CUDA out of memory",
+        ]
+        for line in innocent:
+            assert not re.search(HF_CACHE_MISS, line), f"false positive on: {line}"
+
+    def test_the_cache_miss_pattern_matches_the_real_error(self):
+        """The message from the job this was written for."""
+        import re
+
+        from pixiecad.generative.hunyuan_remote import HF_CACHE_MISS
+
+        real = (
+            "huggingface_hub.errors.LocalEntryNotFoundError: Cannot find an "
+            "appropriate cached snapshot folder for the specified revision on the "
+            "local disk and outgoing traffic has been disabled."
+        )
+        assert re.search(HF_CACHE_MISS, real)
