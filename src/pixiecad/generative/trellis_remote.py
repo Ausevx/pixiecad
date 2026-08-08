@@ -187,9 +187,28 @@ def build_trellis_script(
 
     ready_tries = max(1, ready_timeout_s // 5)
 
+    from .hunyuan_remote import HF_CACHE_MISS, hf_offline_preamble
+
+    # The Hunyuan path can wrap its one-shot `docker run` in hf_run and retry.
+    # This container is detached, so a cache miss does not surface until the
+    # worker is already loading models -- it shows up as a container that dies,
+    # or one that reports status=error, minutes later. The recovery is the same
+    # (drop offline mode and let it fetch the one missing repo) but it has to
+    # be spliced into the readiness loop instead.
+    retry_online = f"""
+  if [ -n "$HF_OFFLINE" ] && docker logs {CONTAINER_NAME} 2>&1 | grep -qE '{HF_CACHE_MISS}'; then
+    echo "pixiecad: a model is missing from this host cache; restarting the worker with network access" >&2
+    docker rm -f {CONTAINER_NAME} >/dev/null 2>&1 || true
+    HF_OFFLINE=""
+    {docker_run_command(image, avoid_gated=avoid_gated)}
+    tries=0
+    sleep 5
+    continue
+  fi"""
+
     return f"""set -e
 mkdir -p out {REMOTE_OUTPUTS_DIR}
-{install_token}if [ -z "$(docker ps -q -f name=^{CONTAINER_NAME}$ -f status=running)" ]; then
+{hf_offline_preamble()}{install_token}if [ -z "$(docker ps -q -f name=^{CONTAINER_NAME}$ -f status=running)" ]; then
   docker rm -f {CONTAINER_NAME} >/dev/null 2>&1 || true
   {docker_run_command(image, avoid_gated=avoid_gated)}
 fi
@@ -199,7 +218,7 @@ while :; do
   # A dead container will never become ready, so stop waiting the moment it
   # exits rather than burning the full timeout on a corpse. An OOM kill shows
   # up here as a non-running container with exit code 137.
-  if [ -z "$(docker ps -q -f name=^{CONTAINER_NAME}$ -f status=running)" ]; then
+  if [ -z "$(docker ps -q -f name=^{CONTAINER_NAME}$ -f status=running)" ]; then{retry_online}
     echo "TRELLIS worker exited during startup (code $(docker inspect -f '{{{{.State.ExitCode}}}}' {CONTAINER_NAME} 2>/dev/null))" >&2
     echo "exit 137 means the host kernel OOM-killed it: loading the model peaked past 36 GB in testing, so use a 64 GB VM (g2-standard-16 or larger)." >&2
     docker logs --tail 40 {CONTAINER_NAME} >&2 || true
@@ -208,7 +227,7 @@ while :; do
   # A failed preload leaves the container up but permanently unusable, so the
   # error state has to end the wait too — otherwise we sit here for the full
   # timeout while the worker cheerfully answers /ready with 200.
-  if curl -sf --max-time 10 {url}/ready | grep -q '"status"[ ]*:[ ]*"error"'; then
+  if curl -sf --max-time 10 {url}/ready | grep -q '"status"[ ]*:[ ]*"error"'; then{retry_online}
     echo "TRELLIS worker failed to initialise:" >&2
     curl -sf --max-time 10 {url}/ready >&2 || true
     exit 1

@@ -215,6 +215,17 @@ class TestDilationScalesWithResolution:
         for divisions, minimum in ((128, 2), (160, 3), (192, 3), (256, 6)):
             assert rule(divisions) >= minimum, f"{divisions} needs {minimum}"
 
+    def test_the_retry_keeps_the_smoothing(self):
+        """Whatever the caller asked for has to survive the finer-grid retry;
+        the sibling bug below was exactly this, for dilation."""
+        import inspect
+
+        from pixiecad.meshops import solidify as mod
+
+        src = inspect.getsource(mod.solidify)
+        retry = src[src.index("return solidify("):]
+        assert "smooth_sigma=smooth_sigma" in retry
+
     def test_the_retry_recomputes_dilation(self):
         """The refinement pass runs at a finer grid. Forwarding the coarse
         dilation into it put fill back to 0.09 -- it must pass None."""
@@ -225,3 +236,161 @@ class TestDilationScalesWithResolution:
         src = inspect.getsource(mod.solidify)
         retry = src[src.index("return solidify("):]
         assert "dilate=None" in retry
+
+
+class TestCurvedSurfacesAreNotTerraced:
+    """The user-visible defect: "the flat faces get solidified better and the
+    curved ones are still like a mesh".
+
+    Extracting from a BINARY grid gives marching cubes nothing to interpolate,
+    so every vertex lands on a voxel corner and a curved surface degenerates
+    into 45-degree steps. Flat faces of the object lie on grid planes and are
+    unaffected, which is exactly the asymmetry that was reported.
+
+    The tell is the dihedral angle histogram. On a shipped model, 4.2% of edges
+    sat at *precisely* 45 degrees while the 5-20 degree band -- where a real
+    curved surface lives -- was empty. Watertightness, fill ratio and component
+    count all passed throughout, which is why this survived so long.
+    """
+
+    @staticmethod
+    def _dihedrals(mesh: trimesh.Trimesh) -> np.ndarray:
+        return np.degrees(mesh.face_adjacency_angles)
+
+    def test_a_sphere_has_no_staircase(self):
+        r = solidify(_perforated(), only_if_shattered=False, _retry=False)
+        angles = self._dihedrals(r.mesh)
+        at_45 = ((angles >= 40) & (angles < 50)).mean()
+        assert at_45 < 0.005, f"{at_45:.1%} of edges are 45-degree steps"
+
+    def test_curvature_lands_in_the_band_a_real_surface_uses(self):
+        """Not just "no 45s" -- a sphere must actually curve. A blob that had
+        been smoothed flat would also pass the test above."""
+        r = solidify(_perforated(), only_if_shattered=False, _retry=False)
+        angles = self._dihedrals(r.mesh)
+        gentle = ((angles > 0.5) & (angles < 20)).mean()
+        assert gentle > 0.10, f"only {gentle:.1%} of edges show any curvature"
+
+    def test_smoothing_does_not_move_the_surface(self):
+        """Blurring the field is only acceptable because it is nearly free.
+        Measured against the true offset on a real mesh: 0.09% of object size
+        at p95. Here, extents must survive within a voxel."""
+        src = _perforated()
+        smoothed = solidify(src, only_if_shattered=False, _retry=False)
+        raw = solidify(src, smooth_sigma=0.0, only_if_shattered=False, _retry=False)
+        assert np.allclose(smoothed.mesh.extents, raw.mesh.extents, atol=0.03 * src.extents.max())
+
+    def test_it_still_encloses_the_same_volume(self):
+        """Smoothing must not deflate the body the repair just built."""
+        r = solidify(_perforated(), only_if_shattered=False, _retry=False)
+        assert r.fill_after > 0.9, f"fill fell to {r.fill_after:.2f}"
+
+    def test_sigma_zero_is_still_a_valid_surface(self):
+        """The escape hatch has to work: a distance field terraces far less
+        than a binary one even unsmoothed, so 0 is a legitimate choice.
+
+        Also the only test that catches the isovalue nudge. An unsmoothed
+        distance transform is integer-valued along the axes, so an integer
+        offset coincides with thousands of samples exactly and marching cubes
+        emits degenerate cells -- watertight goes False. Blurring hides it, so
+        without a sigma=0 case the guard could be deleted and every other test
+        here would still pass.
+        """
+        r = solidify(_perforated(), smooth_sigma=0.0, only_if_shattered=False, _retry=False)
+        assert r.applied and r.mesh.is_watertight
+
+    def test_the_extractor_matches_trimeshs_index_space(self):
+        """The surface is placed by the caller's voxel transform, so swapping
+        extractors must not shift it by half a voxel -- an error that would be
+        invisible in every other assertion here."""
+        from pixiecad.meshops.solidify import extract_surface
+
+        grid = np.zeros((40, 40, 40), dtype=bool)
+        grid[10:30, 10:30, 10:30] = True
+        binary = trimesh.voxel.VoxelGrid(grid).marching_cubes
+        field = extract_surface(grid, offset=0, sigma=0.0)
+        assert field is not None
+        assert np.allclose(field.bounds, binary.bounds)
+
+    def test_eroding_away_the_whole_object_is_reported_not_raised(self):
+        """marching_cubes raises when the isosurface is outside the field.
+        A thin object plus a large dilation reaches that, and it must come
+        back as an unapplied result rather than an exception."""
+        from pixiecad.meshops.solidify import extract_surface
+
+        grid = np.zeros((30, 30, 30), dtype=bool)
+        grid[14:16, 5:25, 5:25] = True  # two voxels thick
+        assert extract_surface(grid, offset=8, sigma=0.0) is None
+
+
+class TestTheWorkerGetsTheFaceBudget:
+    """The generative worker chooses its own face count unless told otherwise.
+
+    The TRELLIS worker's default decimation_target is 2,000,000 faces. Nothing
+    was setting it, so a job with a 300,000-face budget asked for -- and got --
+    1,872,364 faces, and every stage downstream spent its time cleaning up
+    after a number the user never chose.
+    """
+
+    def _spec(self, target):
+        from pixiecad.spec import ObjectSpec
+
+        return ObjectSpec(name="thing", target_faces=target)
+
+    def test_the_budget_becomes_the_decimation_target(self):
+        from pixiecad.pipeline import _generative_defaults
+
+        assert _generative_defaults(None, spec=self._spec(300000))["decimation_target"] == 300000
+
+    def test_an_explicit_option_wins(self):
+        """Defaults must not overwrite something the caller actually asked for."""
+        from pixiecad.pipeline import _generative_defaults
+
+        out = _generative_defaults({"decimation_target": 12345}, spec=self._spec(300000))
+        assert out["decimation_target"] == 12345
+
+    def test_no_budget_leaves_the_worker_alone(self):
+        """ObjectSpec validates target_faces > 0, so this cannot come from a
+        real spec -- the guard is for any other caller, and asking the worker
+        for zero faces would be worse than letting it choose."""
+        from types import SimpleNamespace
+
+        from pixiecad.pipeline import _generative_defaults
+
+        out = _generative_defaults(None, spec=SimpleNamespace(target_faces=None))
+        assert "decimation_target" not in out
+
+    def test_the_caller_dict_is_not_mutated(self):
+        from pixiecad.pipeline import _generative_defaults
+
+        original = {}
+        _generative_defaults(original, spec=self._spec(300000))
+        assert original == {}
+
+    def test_the_mesh_profile_is_selectable(self, monkeypatch):
+        """hd (the worker's default, 1024 geometry) versus game_ready (512,
+        capped at 300k). Every run so far has silently been hd."""
+        from pixiecad.pipeline import _generative_defaults
+
+        monkeypatch.setenv("PIXIECAD_TRELLIS_MESH_PROFILE", "game_ready")
+        assert _generative_defaults(None, spec=self._spec(1000))["mesh_profile"] == "game_ready"
+
+    def test_no_profile_set_means_no_opinion(self, monkeypatch):
+        from pixiecad.pipeline import _generative_defaults
+
+        monkeypatch.delenv("PIXIECAD_TRELLIS_MESH_PROFILE", raising=False)
+        assert "mesh_profile" not in _generative_defaults(None, spec=self._spec(1000))
+
+    def test_the_worker_actually_accepts_these_keys(self):
+        """A default the passthrough filter drops is worse than none: it looks
+        set and does nothing."""
+        from pixiecad.generative.trellis_remote import PASSTHROUGH_OPTIONS
+
+        assert "decimation_target" in PASSTHROUGH_OPTIONS
+        assert "mesh_profile" in PASSTHROUGH_OPTIONS
+
+    def test_they_reach_the_request_form(self):
+        from pixiecad.generative.trellis_remote import build_trellis_script
+
+        script = build_trellis_script(options={"decimation_target": 300000})
+        assert "decimation_target=300000" in script

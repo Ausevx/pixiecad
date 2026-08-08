@@ -16,14 +16,38 @@ field and lands at 0.42-0.88 of its hull: an actual body.
 
 The repair is voxel-based and deliberately not clever:
 
-    voxelise -> dilate -> fill interior -> erode -> marching cubes
+    voxelise -> dilate -> fill interior -> extract the surface back at -dilate
 
 Dilation is the load-bearing step. ``binary_fill_holes`` alone fills only
 regions that are *not* connected to the border, so with gaps between the
 patches the interior drains straight out and nothing gets filled -- measured,
 that path reaches 0.13 where this one reaches 0.96. Dilating first bridges the
-gaps, filling then seals a genuine interior, and eroding by the same amount
-puts the surface back where it started.
+gaps, filling then seals a genuine interior, and pulling the surface back in by
+the same amount puts it where it started.
+
+That last step is a *level set*, not an erosion, and the difference is the
+whole visual quality of the result. Extracting a surface from a binary grid
+gives marching cubes nothing to interpolate: every vertex lands on a voxel
+corner, so a face is either exactly axis-aligned or exactly diagonal. Flat
+faces of the object happen to lie on grid planes and come out clean, while
+every curved surface becomes a 45-degree staircase -- "the flat faces get
+solidified better and the curved ones are still like a mesh". Measured on a
+shipped model, 4.2% of edges sat at exactly 45 degrees and *nothing at all*
+fell in the 5-20 degree band a genuinely curved surface produces.
+
+So the grid is converted to a signed distance field first, lightly blurred,
+and the surface is taken at the -dilate isosurface, which is where erosion
+would have put it. Distances are continuous, so marching cubes interpolates
+and the terracing has nowhere to come from. Measured on the same mesh:
+
+    45-degree edges   4.2%  ->  0.0%
+    mean dihedral     3.20  ->  0.82 degrees
+    fill              0.958 ->  0.969
+    surface moved     0.02% of object size mean, 0.09% p95
+
+That error is an order of magnitude below what voxelising costs in the first
+place (0.55% mean), so the smoothing is close to free in accuracy terms. It is
+also faster than the erosion it replaces.
 
 Measured on a real job, 250k-face input at 128 divisions, dilate 2:
 
@@ -116,6 +140,24 @@ FACES_PER_DIVISION_SQ = 11.5
 MAX_DIVISIONS = 256
 MIN_DIVISIONS = 64
 
+#: Blur applied to the distance field before extraction, in VOXELS -- so it is
+#: resolution-independent and needs no scaling with ``divisions``.
+#:
+#: The distance transform is exact but quantised, which leaves fine noise on
+#: the extracted surface. Swept against the true offset surface on a real mesh:
+#:
+#:     sigma   mean dihedral   surface error (p95, % of object size)
+#:     0.0         8.21              0.00
+#:     1.0         3.41              0.05
+#:     1.5         0.82              0.09
+#:     2.0         0.72              0.14
+#:
+#: 1.5 is where the noise is fully suppressed; past it the curve flattens and
+#: only the error keeps growing. The cost is that a genuinely sharp convex edge
+#: picks up a fillet of roughly this radius -- 0.6% of the object at 235
+#: divisions, which is smaller than the voxel grid's own fidelity.
+SMOOTH_SIGMA = 1.5
+
 
 def divisions_for_target(target_faces: int | None) -> int:
     """Grid resolution that yields roughly ``target_faces`` after extraction.
@@ -131,12 +173,48 @@ def divisions_for_target(target_faces: int | None) -> int:
     return max(MIN_DIVISIONS, min(MAX_DIVISIONS, est))
 
 
+def extract_surface(
+    grid: np.ndarray, *, offset: float, sigma: float = SMOOTH_SIGMA
+) -> trimesh.Trimesh | None:
+    """Surface of ``grid`` pulled ``offset`` voxels inward, without terracing.
+
+    Returns vertices in the same index space ``trimesh``'s own
+    ``VoxelGrid.marching_cubes`` uses, so the caller's transform is unchanged.
+
+    None when the requested isosurface does not exist in the field -- an offset
+    larger than the object's own half-thickness erodes it away completely, and
+    ``marching_cubes`` raises rather than returning an empty mesh.
+    """
+    from scipy import ndimage
+    from skimage import measure
+
+    # Signed: positive outside, negative inside, zero on the dilated boundary.
+    field = ndimage.distance_transform_edt(~grid) - ndimage.distance_transform_edt(grid)
+    if sigma > 0:
+        field = ndimage.gaussian_filter(field, sigma=sigma)
+
+    # Nudge off the exact isovalue. An unsmoothed distance transform is
+    # integer-valued along the axes, so an integer offset lands exactly on
+    # thousands of samples (measured: 10,331 on a 128^3 grid) and marching
+    # cubes emits degenerate cells there -- the surface comes back with holes
+    # and ``is_watertight`` is False, which is the one property this whole
+    # module exists to guarantee. A ten-thousandth of a voxel is far below any
+    # geometric tolerance here and a no-op once the field is blurred.
+    level = -float(offset) - 1e-4
+    if not (field.min() < level < field.max()):
+        return None
+
+    verts, faces, _, _ = measure.marching_cubes(field, level=level)
+    return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+
+
 def solidify(
     mesh: trimesh.Trimesh,
     *,
     divisions: int | None = None,
     target_faces: int | None = None,
     dilate: int | None = None,
+    smooth_sigma: float = SMOOTH_SIGMA,
     only_if_shattered: bool = True,
     fill_threshold: float = 0.15,
     _retry: bool = True,
@@ -152,6 +230,10 @@ def solidify(
     ``divisions`` so the bridged distance stays constant in world units;
     raise it for a more shattered input, at the cost of filling narrower
     concavities.
+
+    ``smooth_sigma`` is the distance-field blur, in voxels. Set it to 0 for a
+    faithful-but-noisy surface; it is what keeps curved regions from coming out
+    as staircases.
     """
     if divisions is None:
         divisions = divisions_for_target(target_faces)
@@ -202,7 +284,6 @@ def solidify(
     grid = np.pad(voxels.matrix, pad)
     grid = ndimage.binary_dilation(grid, iterations=dilate)
     grid = ndimage.binary_fill_holes(grid)
-    grid = ndimage.binary_erosion(grid, iterations=dilate)
 
     if not grid.any():
         return SolidifyResult(
@@ -210,7 +291,13 @@ def solidify(
             before_components, before_fill, before_fill,
         )
 
-    solid = trimesh.voxel.VoxelGrid(grid).marching_cubes
+    solid = extract_surface(grid, offset=dilate, sigma=smooth_sigma)
+    if solid is None:
+        return SolidifyResult(
+            mesh, False, f"nothing survives eroding {dilate} voxels", before_components,
+            before_components, before_fill, before_fill,
+        )
+
     # marching_cubes comes back in voxel index space; put it back in world
     # coordinates, then undo the padding that was added to give room to dilate.
     solid.apply_transform(voxels.transform)
@@ -240,6 +327,7 @@ def solidify(
                     # the coarse dilation stops bridging the gaps entirely --
                     # it put fill back to 0.09, undoing the whole repair.
                     dilate=None,
+                    smooth_sigma=smooth_sigma,
                     only_if_shattered=False,
                     fill_threshold=fill_threshold,
                     _retry=False,

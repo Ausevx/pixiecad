@@ -119,9 +119,7 @@ def build_hunyuan_script(
     if seed is not None:
         flags.append(f"--seed {int(seed)}")
 
-    return (
-        "set -e\n"
-        "mkdir -p out\n"
+    command = (
         # Both caches are mounted from the host so the ~10 GB of weights survive
         # between jobs. hy3dgen keeps its own cache separate from HuggingFace's,
         # and missing it means every --rm run re-downloads the whole model.
@@ -132,7 +130,13 @@ def build_hunyuan_script(
         '-v "$HOME/.cache/hy3dgen":/root/.cache/hy3dgen '
         '-v "$HOME/.u2net":/root/.u2net '
         "-w /work "
-        f"{image} python /work/hunyuan_gen.py {' '.join(flags)}\n"
+        f"{image} python /work/hunyuan_gen.py {' '.join(flags)}"
+    )
+    return (
+        "set -e\n"
+        "mkdir -p out\n"
+        + hf_offline_preamble()
+        + f"hf_run '{command}'\n"
     )
 
 
@@ -140,32 +144,78 @@ DEFAULT_PAINT_IMAGE = "pixiecad-hunyuan-paint:latest"
 _TEXTURE_SCRIPT = Path(__file__).parent / "remote_scripts" / "hunyuan_texture.py"
 
 
-def hf_offline_flag() -> str:
-    """``-e HF_HUB_OFFLINE=1`` unless the caller explicitly wants the network.
+# What huggingface_hub says when offline mode meets something it has not got.
+HF_CACHE_MISS = "LocalEntryNotFoundError|HF_HUB_OFFLINE|OfflineModeIsEnabled"
 
-    The weights are baked into the machine image precisely so a job never
-    downloads them. But huggingface_hub does not treat a full cache as
-    sufficient: ``snapshot_download`` contacts the Hub to resolve the revision
-    on every call, even when every file is already present. So a Hugging Face
-    outage broke a job that needed nothing from Hugging Face --
 
-      ConnectionError: HTTP status server error (500 Internal Server Error),
-      domain: https://us.aws.cdn.hf.co/xorbs/default/2a0a6c2...
-
-    -- after generation and solidify had already succeeded. Offline mode makes
-    the cache authoritative, which is what having a cache was supposed to mean.
-    Verified against the baked image: the paint weights resolve from cache with
-    no network at all.
-
-    PIXIECAD_HF_ONLINE=1 turns it off, for adding a model the image lacks. A
-    cold cache under offline mode fails immediately and says what is missing,
-    which beats silently pulling 19 GB at the GPU rate.
-    """
+def hf_offline_enabled() -> bool:
+    """False when the caller has explicitly asked for the network."""
     import os
 
-    if os.environ.get("PIXIECAD_HF_ONLINE", "").strip().lower() in {"1", "true", "yes"}:
-        return ""
-    return "-e HF_HUB_OFFLINE=1 "
+    return os.environ.get("PIXIECAD_HF_ONLINE", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def hf_offline_flag() -> str:
+    """The docker flag slot. Resolved on the host by ``hf_offline_preamble``.
+
+    A shell variable rather than a literal, so a script can turn offline mode
+    off partway through and re-run the same command -- which is the whole point
+    of the retry below.
+    """
+    return "$HF_OFFLINE "
+
+
+def hf_offline_preamble() -> str:
+    """Shell that defines ``$HF_OFFLINE`` and the ``hf_run`` retry wrapper.
+
+    Offline mode exists because huggingface_hub does not treat a full cache as
+    sufficient: ``snapshot_download`` contacts the Hub on every call, so a Hub
+    outage broke a job that needed nothing from the Hub. Making the cache
+    authoritative is what having a cache was supposed to mean.
+
+    But it must be a *preference*, not a wall. It was first shipped as a wall,
+    and that turned out to be built on a false premise -- the baked image does
+    not in fact hold every repo a job needs. ``tencent/Hunyuan3D-2.1``, which
+    the paint stage requires, was never in the cache at all:
+
+      LocalEntryNotFoundError: Cannot find an appropriate cached snapshot
+      folder for the specified revision on the local disk and outgoing traffic
+      has been disabled.
+
+    So texturing failed outright on a job whose geometry had already succeeded.
+    The earlier CDN 500 had been the *same missing repo* downloading live and
+    failing; offline mode did not cause the gap, it only made it fatal.
+
+    Hence: try the cache, and if -- and only if -- something is genuinely
+    missing from it, fetch that one thing over the network and carry on. An
+    outage still cannot break a job whose weights are all present, a cold cache
+    costs a download instead of a build, and the retry is self-healing because
+    the download populates the cache for next time.
+
+    PIXIECAD_HF_ONLINE=1 skips straight to the network.
+    """
+    offline = 'HF_OFFLINE="-e HF_HUB_OFFLINE=1"' if hf_offline_enabled() else 'HF_OFFLINE=""'
+    return (
+        f"{offline}\n"
+        "hf_run() {\n"
+        "  _hf_log=$(mktemp)\n"
+        '  if eval "$1" >"$_hf_log" 2>&1; then cat "$_hf_log"; rm -f "$_hf_log"; return 0; fi\n'
+        '  cat "$_hf_log"\n'
+        f'  if grep -qE \'{HF_CACHE_MISS}\' "$_hf_log"; then\n'
+        '    echo "pixiecad: a model is missing from this host cache; fetching it" >&2\n'
+        '    rm -f "$_hf_log"\n'
+        '    HF_OFFLINE=""\n'
+        '    eval "$1"\n'
+        "    return $?\n"
+        "  fi\n"
+        '  rm -f "$_hf_log"\n'
+        "  return 1\n"
+        "}\n"
+    )
 
 
 def build_texture_script(
@@ -186,9 +236,7 @@ def build_texture_script(
     ended up with 40,000 the moment texturing was enabled. The image is patched
     to read HUNYUAN_SIMPLIFY_TARGET; passing it keeps the user's budget.
     """
-    return (
-        "set -e\n"
-        "mkdir -p out\n"
+    command = (
         "docker run --rm --gpus all "
         + hf_offline_flag()
         + (f"-e HUNYUAN_SIMPLIFY_TARGET={int(simplify_target)} " if simplify_target else "")
@@ -204,7 +252,13 @@ def build_texture_script(
         f"{image} python /work/hunyuan_texture.py "
         f"--mesh /work/{mesh_name} --image /work/images/{image_name} "
         f"--out /work/out/textured.glb --max-views {int(max_views)} "
-        f"--resolution {int(resolution)}\n"
+        f"--resolution {int(resolution)}"
+    )
+    return (
+        "set -e\n"
+        "mkdir -p out\n"
+        + hf_offline_preamble()
+        + f"hf_run '{command}'\n"
     )
 
 

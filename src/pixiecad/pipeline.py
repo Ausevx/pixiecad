@@ -83,6 +83,35 @@ def _ingested_images_dir(report: IngestReport) -> Path | None:
     return None
 
 
+def _generative_defaults(options: dict | None, *, spec: ObjectSpec) -> dict:
+    """Fill in worker knobs the job already knows the answer to.
+
+    The TRELLIS worker takes a ``decimation_target`` and, when nobody sets one,
+    picks its own default of **2,000,000 faces** -- it has no idea what the job
+    asked for. So a build with a 300,000-face budget requested a 1.87M-face
+    mesh and got one, and every stage downstream was left cleaning up after a
+    number the user never chose.
+
+    Unknown keys are dropped by each backend's own passthrough filter, so
+    setting a TRELLIS knob costs nothing on the Hunyuan path.
+
+    ``PIXIECAD_TRELLIS_MESH_PROFILE`` selects the worker's ``hd`` (its default:
+    geometry at 1024, textures at 4096) or ``game_ready`` (512 and 2048, and a
+    hard 300,000-face cap) profile. Left unset the worker keeps choosing ``hd``,
+    which is what every run so far has used -- worth knowing when comparing
+    output against a hosted demo, which need not be on the same profile.
+    """
+    import os
+
+    out = dict(options or {})
+    if spec.target_faces:
+        out.setdefault("decimation_target", int(spec.target_faces))
+    profile = os.environ.get("PIXIECAD_TRELLIS_MESH_PROFILE", "").strip().lower()
+    if profile:
+        out.setdefault("mesh_profile", profile)
+    return out
+
+
 def _run_generative(
     *,
     report,
@@ -131,9 +160,10 @@ def _run_generative(
     t0 = time.monotonic()
     all_images = [Path(p.working_path) for p in report.photos if p.working_path]
     images = _select_conditioning_views(all_images)
+    gen_options = _generative_defaults(generative_options, spec=spec)
     try:
         result = run_generate(
-            GenerateRequest(images=images, options=generative_options or {}),
+            GenerateRequest(images=images, options=gen_options),
             ws,
             backend=backend,
         )

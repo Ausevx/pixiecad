@@ -188,6 +188,12 @@ class TestCachedWeightsAreAuthoritative:
     snapshot_download contacts the Hub to resolve the revision on every call.
     A Hub CDN 500 therefore killed a job that needed nothing from the Hub,
     after generation and solidify had already succeeded.
+
+    Shipped first as an absolute, which was worse. The premise that the image
+    holds every repo turned out to be false -- tencent/Hunyuan3D-2.1, which
+    texturing requires, was never in the cache at all -- so offline mode turned
+    a slow download into a failed build. It is now a preference: see
+    TestOfflineFallsBackOnACacheMiss.
     """
 
     def test_texturing_runs_offline_by_default(self, monkeypatch):
@@ -203,10 +209,10 @@ class TestCachedWeightsAreAuthoritative:
         assert "HF_HUB_OFFLINE=1" in build_hunyuan_script()
 
     def test_the_trellis_worker_runs_offline_by_default(self, monkeypatch):
-        from pixiecad.generative.trellis_remote import docker_run_command
+        from pixiecad.generative.trellis_remote import build_trellis_script
 
         monkeypatch.delenv("PIXIECAD_HF_ONLINE", raising=False)
-        assert "HF_HUB_OFFLINE=1" in docker_run_command()
+        assert "HF_HUB_OFFLINE=1" in build_trellis_script()
 
     def test_it_can_be_turned_off_to_add_a_model(self, monkeypatch):
         """Offline has to be escapable, or fetching something genuinely new
@@ -214,7 +220,11 @@ class TestCachedWeightsAreAuthoritative:
         from pixiecad.generative.hunyuan_remote import build_texture_script
 
         monkeypatch.setenv("PIXIECAD_HF_ONLINE", "1")
-        assert "HF_HUB_OFFLINE" not in build_texture_script()
+        # The name still appears in hf_run's own cache-miss pattern, so assert
+        # on the assignment: it is the flag that must be empty.
+        script = build_texture_script()
+        assert 'HF_OFFLINE=""' in script
+        assert 'HF_OFFLINE="-e HF_HUB_OFFLINE=1"' not in script
 
     def test_the_flag_precedes_the_image_name(self, monkeypatch):
         """docker run flags after the image are passed to the container as
@@ -224,3 +234,159 @@ class TestCachedWeightsAreAuthoritative:
         monkeypatch.delenv("PIXIECAD_HF_ONLINE", raising=False)
         script = build_texture_script()
         assert script.index("HF_HUB_OFFLINE") < script.index("python /work/")
+
+
+class TestOfflineFallsBackOnACacheMiss:
+    """Offline mode must never be the reason a build fails.
+
+    The regression, from a real job whose geometry had already succeeded:
+
+        WARNING: texturing failed: ...
+        LocalEntryNotFoundError: Cannot find an appropriate cached snapshot
+        folder for the specified revision on the local disk and outgoing
+        traffic has been disabled.
+
+    tencent/Hunyuan3D-2.1 -- the paint weights -- was not in the baked cache.
+    The earlier CDN 500 that motivated offline mode had been that same repo
+    downloading live and failing; offline did not cause the gap, it made it
+    fatal. So it now retries with the network on a genuine cache miss, and
+    only on a cache miss.
+
+    These run the emitted shell for real against a stub, because the whole
+    thing is control flow: asserting on substrings would have passed for a
+    wrapper that never actually retried.
+    """
+
+    PREAMBLE_STUB = """
+attempts=0
+fake() {
+  attempts=$((attempts+1))
+  case "$*" in
+    *HF_HUB_OFFLINE*)
+      echo "LocalEntryNotFoundError: Cannot find an appropriate cached snapshot" >&2
+      return 1 ;;
+    *) echo "fetched over the network" ; return 0 ;;
+  esac
+}
+"""
+
+    @staticmethod
+    def _sh(script: str):
+        import subprocess
+
+        return subprocess.run(
+            ["sh", "-c", script], capture_output=True, text=True, timeout=30
+        )
+
+    def _run(self, body: str, monkeypatch, *, online: bool = False):
+        from pixiecad.generative.hunyuan_remote import hf_offline_preamble
+
+        if online:
+            monkeypatch.setenv("PIXIECAD_HF_ONLINE", "1")
+        else:
+            monkeypatch.delenv("PIXIECAD_HF_ONLINE", raising=False)
+        # set -e exactly as every generated script opens, because that is what
+        # turns a failed hf_run into a failed job. Without it here the suite
+        # would happily pass a wrapper that swallowed every error.
+        return self._sh("set -e\n" + hf_offline_preamble() + self.PREAMBLE_STUB + body)
+
+    def test_a_cache_miss_is_retried_with_the_network(self, monkeypatch):
+        r = self._run("hf_run 'fake $HF_OFFLINE --gpus all'\necho rc=$?", monkeypatch)
+        assert r.returncode == 0, r.stderr
+        assert "fetched over the network" in r.stdout
+        assert "rc=0" in r.stdout
+
+    def test_the_retry_actually_drops_the_offline_flag(self, monkeypatch):
+        """Retrying with the same flags would just fail identically."""
+        r = self._run(
+            "hf_run 'fake $HF_OFFLINE --gpus all'\necho attempts=$attempts", monkeypatch
+        )
+        assert "attempts=2" in r.stdout
+
+    def test_an_unrelated_failure_is_not_retried(self, monkeypatch):
+        """A CUDA OOM is not a cache miss. Running the whole job twice to
+        rediscover that would double the GPU bill for nothing."""
+        r = self._run(
+            "broken() { attempts=$((attempts+1)); echo 'CUDA out of memory' >&2; return 1; }\n"
+            "hf_run 'broken $HF_OFFLINE' || true\necho attempts=$attempts",
+            monkeypatch,
+        )
+        assert "attempts=1" in r.stdout
+
+    def test_an_unrelated_failure_still_fails(self, monkeypatch):
+        r = self._run(
+            "broken() { echo 'CUDA out of memory' >&2; return 1; }\n"
+            "hf_run 'broken $HF_OFFLINE'\necho SHOULD-NOT-REACH",
+            monkeypatch,
+        )
+        assert "SHOULD-NOT-REACH" not in r.stdout
+        assert r.returncode != 0
+
+    def test_a_cache_hit_never_touches_the_network(self, monkeypatch):
+        """The property offline mode exists for: one attempt, offline, done."""
+        r = self._run(
+            "cached() { attempts=$((attempts+1)); echo 'loaded from cache'; }\n"
+            "hf_run 'cached $HF_OFFLINE'\necho attempts=$attempts",
+            monkeypatch,
+        )
+        assert r.returncode == 0
+        assert "attempts=1" in r.stdout
+
+    def test_output_reaches_the_log_either_way(self, monkeypatch):
+        """hf_run buffers to a file to inspect it; it must still print it, or
+        every remote failure becomes undiagnosable."""
+        r = self._run(
+            "chatty() { echo 'step 1 of 3'; return 0; }\nhf_run 'chatty $HF_OFFLINE'",
+            monkeypatch,
+        )
+        assert "step 1 of 3" in r.stdout
+
+    def test_online_mode_skips_straight_to_the_network(self, monkeypatch):
+        r = self._run(
+            "hf_run 'fake $HF_OFFLINE'\necho attempts=$attempts", monkeypatch, online=True
+        )
+        assert "attempts=1" in r.stdout
+        assert "fetched over the network" in r.stdout
+
+    def test_every_generated_script_is_valid_posix_sh(self, monkeypatch):
+        """The preamble is spliced into three scripts by string formatting."""
+        import subprocess
+
+        from pixiecad.generative.hunyuan_remote import (
+            build_hunyuan_script,
+            build_texture_script,
+        )
+        from pixiecad.generative.trellis_remote import build_trellis_script
+
+        monkeypatch.delenv("PIXIECAD_HF_ONLINE", raising=False)
+        for script in (build_texture_script(), build_hunyuan_script(), build_trellis_script()):
+            check = subprocess.run(
+                ["sh", "-n"], input=script, capture_output=True, text=True, timeout=30
+            )
+            assert check.returncode == 0, check.stderr
+
+    def test_the_trellis_worker_restarts_online_on_a_cache_miss(self, monkeypatch):
+        """That container is detached, so hf_run cannot wrap it -- the recovery
+        has to be spliced into the readiness loop instead."""
+        from pixiecad.generative.trellis_remote import build_trellis_script
+
+        monkeypatch.delenv("PIXIECAD_HF_ONLINE", raising=False)
+        script = build_trellis_script()
+        assert script.count('HF_OFFLINE=""') >= 1
+        assert "restarting the worker with network access" in script
+        # It must re-run the container, not just clear the variable and wait.
+        after = script[script.index("restarting the worker"):]
+        assert "docker run -d" in after
+
+    def test_every_generated_script_sets_e(self, monkeypatch):
+        """The retry reports a non-cache-miss failure by returning non-zero,
+        which only stops the job because of set -e."""
+        from pixiecad.generative.hunyuan_remote import (
+            build_hunyuan_script,
+            build_texture_script,
+        )
+        from pixiecad.generative.trellis_remote import build_trellis_script
+
+        monkeypatch.delenv("PIXIECAD_HF_ONLINE", raising=False)
+        for script in (build_texture_script(), build_hunyuan_script(), build_trellis_script()):
+            assert script.startswith("set -e\n")
