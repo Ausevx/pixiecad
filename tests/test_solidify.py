@@ -40,6 +40,22 @@ def _perforated(subdivisions: int = 5, keep: float = 0.7) -> trimesh.Trimesh:
     return trimesh.Trimesh(vertices=np.array(verts), faces=np.array(faces), process=False)
 
 
+def _scattered() -> trimesh.Trimesh:
+    """Solid boxes spread far apart: extracts cleanly, encloses almost nothing.
+
+    The deterministic stand-in for a bad generation. _hollow used to serve this
+    role, but escalation now rescues it (fill 0.099 -> 0.994 at dilate 8) --
+    which is the point of escalation, and why a fixture that cannot be closed
+    at ANY radius is needed instead. These boxes are solid, so they survive the
+    inward offset and extraction succeeds; they simply occupy a fraction of
+    their own convex hull no dilation can fill.
+    """
+    return trimesh.util.concatenate([
+        trimesh.creation.box(extents=(0.08, 0.08, 0.08)).apply_translation(t)
+        for t in ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1))
+    ])
+
+
 def _hollow(keep: float = 0.10) -> trimesh.Trimesh:
     """Sparse enough that it encloses almost nothing: the detection signal.
 
@@ -77,7 +93,7 @@ class TestDetection:
 
 class TestSolidify:
     def test_shattered_input_becomes_one_watertight_body(self):
-        r = solidify(_perforated(), only_if_shattered=False)
+        r = solidify(_perforated(), divisions=128, only_if_shattered=False)
         assert r.applied
         assert r.mesh.is_watertight
         assert r.components_after == 1
@@ -87,11 +103,11 @@ class TestSolidify:
         """The whole point. On the real mesh, binary_fill_holes alone reaches
         0.13 because the gaps let the interior drain to the border; dilating
         first is what makes the fill mean anything (measured 0.96)."""
-        r = solidify(_perforated(), only_if_shattered=False)
+        r = solidify(_perforated(), divisions=128, only_if_shattered=False)
         assert r.fill_after > 0.9, f"only reached {r.fill_after:.2f}"
 
     def test_no_open_edges_remain(self):
-        r = solidify(_perforated(), only_if_shattered=False)
+        r = solidify(_perforated(), divisions=128, only_if_shattered=False)
         _, counts = np.unique(r.mesh.edges_sorted, axis=0, return_counts=True)
         assert int((counts == 1).sum()) == 0
 
@@ -99,12 +115,12 @@ class TestSolidify:
         """A solid that ignores the input is not a repair. Extents must track
         the original within a voxel or two."""
         src = _perforated()
-        r = solidify(src, only_if_shattered=False)
+        r = solidify(src, divisions=128, only_if_shattered=False)
         assert np.allclose(r.mesh.extents, src.extents, atol=0.15 * src.extents.max())
 
     def test_the_result_is_not_a_featureless_blob(self):
         """Dilation could in principle inflate everything to its hull."""
-        r = solidify(_perforated(), only_if_shattered=False)
+        r = solidify(_perforated(), divisions=128, only_if_shattered=False)
         assert r.mesh.volume / r.mesh.convex_hull.volume > 0.5
 
     def test_a_healthy_mesh_is_left_alone(self):
@@ -117,7 +133,7 @@ class TestSolidify:
         assert "left alone" in r.reason
 
     def test_it_can_be_forced_on_a_healthy_mesh(self):
-        r = solidify(trimesh.creation.box(), only_if_shattered=False)
+        r = solidify(trimesh.creation.box(), divisions=128, only_if_shattered=False)
         assert r.applied
 
     def test_degenerate_input_does_not_raise(self):
@@ -155,87 +171,129 @@ class TestPipelineWiring:
         assert "except Exception" in head
 
 
-class TestResolutionFollowsBudget:
-    """Solidify replaces the mesh, so its resolution caps the face budget.
+class TestResolutionIsIndependentOfTheBudget:
+    """The grid must NOT follow the face budget. This class used to assert the
+    opposite, and both positions came from a real bug.
 
-    A real job asked for 300,000 faces and the log read:
+    First a job asked for 300,000 faces and got 89,844, because the grid was
+    fixed at 128 and decimation only removes faces. The fix tied divisions to
+    the budget. But every error solidify makes is a fixed number of VOXELS, so
+    that made dimensional accuracy a function of how many triangles the user
+    asked for: a 20,000-face job got a 64^3 grid and came back 8.5% too thick
+    on its thinnest axis, on an object whose thinnest axis is 37% of its
+    longest.
 
-        decimate: 89844 -> 89844 faces (target 300000)
-
-    because the grid was fixed at 128 and decimation can only remove faces.
+    The grid now always runs as fine as the machine affords and decimation
+    takes the count down, which is what decimation is for.
     """
 
-    def test_a_bigger_budget_asks_for_a_finer_grid(self):
-        from pixiecad.meshops.solidify import divisions_for_target
+    def test_the_grid_does_not_follow_the_face_budget(self):
+        import inspect
 
-        assert divisions_for_target(300000) > divisions_for_target(50000)
+        from pixiecad.meshops import solidify as mod
 
-    def test_the_grid_is_capped_for_memory(self):
-        """256^3 costs about 3.4 GB; past that the 16 GB machine is the limit."""
-        from pixiecad.meshops.solidify import MAX_DIVISIONS, divisions_for_target
+        assert "target_faces" not in inspect.getsource(mod.solidify)
+        assert not hasattr(mod, "divisions_for_target")
 
-        assert divisions_for_target(10_000_000) == MAX_DIVISIONS
-
-    def test_no_budget_still_works(self):
-        from pixiecad.meshops.solidify import divisions_for_target
-
-        assert divisions_for_target(None) > 0
-        assert divisions_for_target(0) > 0
-
-    def test_the_pipeline_passes_the_budget(self):
+    def test_the_pipeline_asks_for_no_particular_size(self):
         import inspect
 
         from pixiecad import pipeline
 
-        assert "target_faces=spec.target_faces" in inspect.getsource(pipeline._run_generative)
+        src = inspect.getsource(pipeline._run_generative)
+        assert "solidify(mesh)" in src
+        assert "target_faces=spec.target_faces" not in src
+
+    def test_the_default_is_the_memory_cap(self):
+        """256^3 measured at 2.06 GB end to end with the chunked voxeliser
+        (3.91 GB without it), on a 16 GB machine. There is no reason to run
+        below it and no room to run above."""
+        from pixiecad.meshops.solidify import DEFAULT_DIVISIONS, MAX_DIVISIONS
+
+        assert DEFAULT_DIVISIONS == MAX_DIVISIONS == 256
+
+    def test_the_default_grid_beats_any_realistic_budget(self):
+        """Why the old refinement retry could be deleted: at a measured ~9.5
+        faces per division squared, 256 yields ~620k -- more than the worker
+        can deliver."""
+        from pixiecad.meshops.solidify import DEFAULT_DIVISIONS
+
+        assert DEFAULT_DIVISIONS**2 * 9.5 > 300_000
+
+    def test_the_pipeline_warns_when_the_grid_undershoots(self):
+        """Dropping target_faces removed the guard against the ORIGINAL bug,
+        so the user has to hear about it instead."""
+        import inspect
+
+        from pixiecad import pipeline
+
+        src = inspect.getsource(pipeline._run_generative)
+        assert "short of the" in src and "voxel" in src
 
 
-class TestDilationScalesWithResolution:
-    """Both bugs found here were mine, and both silently un-did the repair.
+class TestDilationEscalatesInsteadOfGuessing:
+    """Dilation is both what seals the mesh and what destroys its detail.
 
-    Dilation bridges gaps of a fixed WORLD size, so a finer grid needs more
-    voxels to span them. Holding it at 2 while raising divisions dropped fill
-    from 0.955 to 0.093 -- a watertight mesh that is hollow again, which is
-    the worst outcome because every other check still passes.
+    Dilate-then-fill welds shut any gap narrower than twice the radius, so at
+    256 divisions the old rule (divisions/45 = 6 voxels) closed anything under
+    4.7% of the object -- wide enough to swallow a lighter's lid seam. It now
+    STARTS small and widens only when the result does not actually enclose
+    anything, so detail is never given away up front.
+
+    The bug this class originally existed for: holding dilation at 2 while
+    raising divisions dropped fill from 0.955 to 0.093 -- a watertight mesh
+    that is hollow again, the worst outcome because every other check passes.
     """
 
-    def test_dilation_grows_with_the_grid(self):
-        from pixiecad.meshops.solidify import solidify
-
-        coarse = solidify(_perforated(), divisions=128, only_if_shattered=False, _retry=False)
-        fine = solidify(_perforated(), divisions=256, only_if_shattered=False, _retry=False)
-        # Both must actually seal; the point is that the finer one does too.
+    def test_both_resolutions_still_seal(self):
+        coarse = solidify(_perforated(), divisions=128, only_if_shattered=False)
+        fine = solidify(_perforated(), divisions=256, only_if_shattered=False)
         assert coarse.fill_after > 0.9
         assert fine.fill_after > 0.9, f"fine grid left it at {fine.fill_after:.2f}"
 
-    def test_the_measured_minimums_are_covered(self):
+    def test_the_start_is_smaller_than_it_used_to_be(self):
+        """Pins the detail gain so it cannot silently drift back to /45."""
+        from pixiecad.meshops.solidify import start_dilate
+
+        assert 1 < start_dilate(256) < 6
+        assert start_dilate(128) >= 2
+
+    def test_the_schedule_still_reaches_the_measured_minimums(self):
         """Measured on real output: 128 needs 2, 160 needs 3, 192 needs 3,
-        256 needs 6. The rule must meet or exceed each."""
-        rule = lambda d: max(2, -(-d // 45))
+        256 needs 6. The START no longer covers 256 -- the ESCALATION must."""
+        from pixiecad.meshops.solidify import _dilation_schedule, start_dilate
+
         for divisions, minimum in ((128, 2), (160, 3), (192, 3), (256, 6)):
-            assert rule(divisions) >= minimum, f"{divisions} needs {minimum}"
+            schedule = _dilation_schedule(start_dilate(divisions))
+            assert max(schedule) >= minimum, f"{divisions} never reaches {minimum}"
 
-    def test_the_retry_keeps_the_smoothing(self):
-        """Whatever the caller asked for has to survive the finer-grid retry;
-        the sibling bug below was exactly this, for dilation."""
-        import inspect
+    def test_the_schedule_ends_at_the_cap(self):
+        from pixiecad.meshops.solidify import MAX_DILATE, _dilation_schedule
 
-        from pixiecad.meshops import solidify as mod
+        assert _dilation_schedule(2)[-1] == MAX_DILATE
+        assert _dilation_schedule(MAX_DILATE) == [MAX_DILATE]
 
-        src = inspect.getsource(mod.solidify)
-        retry = src[src.index("return solidify("):]
-        assert "smooth_sigma=smooth_sigma" in retry
+    def test_an_extraction_failure_escalates_rather_than_giving_up(self):
+        """A dilation too small to seal leaves thin shells that the inward
+        offset erodes away entirely, and extract_surface returns None. That
+        used to end the call outright -- which matters far more now that the
+        starting radius is deliberately small."""
+        r = solidify(_perforated(), divisions=192, dilate=2, only_if_shattered=False)
+        assert r.applied, "escalation never ran"
+        assert r.fill_after > 0.9, f"escalated but only reached {r.fill_after:.2f}"
 
-    def test_the_retry_recomputes_dilation(self):
-        """The refinement pass runs at a finer grid. Forwarding the coarse
-        dilation into it put fill back to 0.09 -- it must pass None."""
-        import inspect
+    def test_escalation_keeps_the_smoothing(self):
+        """The old recursive escalation could lose its parameters across the
+        call; a loop cannot, so this is asserted behaviourally instead of by
+        grepping the source."""
+        r = solidify(_perforated(), divisions=192, dilate=2, only_if_shattered=False)
+        angles = np.degrees(r.mesh.face_adjacency_angles)
+        assert ((angles >= 40) & (angles < 50)).mean() < 0.005
 
-        from pixiecad.meshops import solidify as mod
-
-        src = inspect.getsource(mod.solidify)
-        retry = src[src.index("return solidify("):]
-        assert "dilate=None" in retry
+    def test_the_reason_reports_what_was_welded_shut(self):
+        """The user cannot see the dilation, but they can see a missing seam."""
+        r = solidify(_perforated(), divisions=128, only_if_shattered=False)
+        assert "gaps under" in r.reason and "%" in r.reason
 
 
 class TestCurvedSurfacesAreNotTerraced:
@@ -258,7 +316,7 @@ class TestCurvedSurfacesAreNotTerraced:
         return np.degrees(mesh.face_adjacency_angles)
 
     def test_a_sphere_has_no_staircase(self):
-        r = solidify(_perforated(), only_if_shattered=False, _retry=False)
+        r = solidify(_perforated(), divisions=128, only_if_shattered=False)
         angles = self._dihedrals(r.mesh)
         at_45 = ((angles >= 40) & (angles < 50)).mean()
         assert at_45 < 0.005, f"{at_45:.1%} of edges are 45-degree steps"
@@ -266,7 +324,7 @@ class TestCurvedSurfacesAreNotTerraced:
     def test_curvature_lands_in_the_band_a_real_surface_uses(self):
         """Not just "no 45s" -- a sphere must actually curve. A blob that had
         been smoothed flat would also pass the test above."""
-        r = solidify(_perforated(), only_if_shattered=False, _retry=False)
+        r = solidify(_perforated(), divisions=128, only_if_shattered=False)
         angles = self._dihedrals(r.mesh)
         gentle = ((angles > 0.5) & (angles < 20)).mean()
         assert gentle > 0.10, f"only {gentle:.1%} of edges show any curvature"
@@ -276,13 +334,13 @@ class TestCurvedSurfacesAreNotTerraced:
         Measured against the true offset on a real mesh: 0.09% of object size
         at p95. Here, extents must survive within a voxel."""
         src = _perforated()
-        smoothed = solidify(src, only_if_shattered=False, _retry=False)
-        raw = solidify(src, smooth_sigma=0.0, only_if_shattered=False, _retry=False)
+        smoothed = solidify(src, divisions=128, only_if_shattered=False)
+        raw = solidify(src, smooth_sigma=0.0, divisions=128, only_if_shattered=False)
         assert np.allclose(smoothed.mesh.extents, raw.mesh.extents, atol=0.03 * src.extents.max())
 
     def test_it_still_encloses_the_same_volume(self):
         """Smoothing must not deflate the body the repair just built."""
-        r = solidify(_perforated(), only_if_shattered=False, _retry=False)
+        r = solidify(_perforated(), divisions=128, only_if_shattered=False)
         assert r.fill_after > 0.9, f"fill fell to {r.fill_after:.2f}"
 
     def test_sigma_zero_is_still_a_valid_surface(self):
@@ -296,7 +354,7 @@ class TestCurvedSurfacesAreNotTerraced:
         without a sigma=0 case the guard could be deleted and every other test
         here would still pass.
         """
-        r = solidify(_perforated(), smooth_sigma=0.0, only_if_shattered=False, _retry=False)
+        r = solidify(_perforated(), smooth_sigma=0.0, divisions=128, only_if_shattered=False)
         assert r.applied and r.mesh.is_watertight
 
     def test_the_extractor_matches_trimeshs_index_space(self):
@@ -470,24 +528,22 @@ class TestAFailedRepairMustNotLookLikeSuccess:
     """
 
     def test_a_good_repair_is_marked_repaired(self):
-        r = solidify(_perforated(), only_if_shattered=False)
+        r = solidify(_perforated(), divisions=128, only_if_shattered=False)
         assert r.repaired
         assert r.fill_after > 0.9
 
     def test_an_unclosable_surface_is_not_marked_repaired(self):
-        """_hollow is sparse enough that no affordable dilation bridges it --
-        the synthetic stand-in for the bad generation."""
-        r = solidify(_hollow(), only_if_shattered=False)
+        r = solidify(_scattered(), divisions=96, only_if_shattered=False)
         assert not r.repaired, f"fill {r.fill_after:.3f} was accepted"
 
     def test_the_reason_says_it_failed_and_what_to_do(self):
-        r = solidify(_hollow(), only_if_shattered=False)
+        r = solidify(_scattered(), divisions=96, only_if_shattered=False)
         assert "could not close" in r.reason
         assert "re-run" in r.reason.lower()
 
     def test_the_mesh_is_still_returned(self):
         """No worse than the input, and the caller may still want to look."""
-        r = solidify(_hollow(), only_if_shattered=False)
+        r = solidify(_scattered(), divisions=96, only_if_shattered=False)
         assert r.mesh is not None and len(r.mesh.faces) > 0
 
     def test_the_low_fill_branch_reports_the_same_way(self):
@@ -505,15 +561,12 @@ class TestAFailedRepairMustNotLookLikeSuccess:
         assert not r.repaired, f"fill {r.fill_after:.3f} was accepted"
         assert "could not close" in r.reason and "re-run" in r.reason.lower()
 
-    def test_dilation_escalates_before_giving_up(self):
-        """The rule setting dilation from divisions is calibrated on one mesh;
-        how wide the gaps are is a property of the generation. On the real bad
-        mesh escalation moved fill 0.047 -> 0.225 -- not enough, but it must be
-        tried before declaring failure."""
-        from pixiecad.meshops.solidify import MAX_DILATE
-
+    def test_escalation_rescues_what_it_can(self):
+        """_hollow is unsealable at the starting radius -- extraction returns
+        None outright -- and escalation turns it into a clean solid. Before
+        escalation fired on that path it came back applied=False."""
         r = solidify(_hollow(), divisions=128, only_if_shattered=False)
-        assert str(MAX_DILATE) in r.reason or r.fill_after > 0.0
+        assert r.repaired and r.fill_after > 0.9
 
     def test_the_floor_sits_between_a_blob_and_real_output(self):
         """Hunyuan output that never needed repair sits at 0.42-0.88, a good
@@ -529,7 +582,12 @@ class TestAFailedRepairMustNotLookLikeSuccess:
         from pixiecad import pipeline
 
         src = inspect.getsource(pipeline._run_generative)
-        assert 'outcome.applied and outcome.repaired else "failed"' in src
+        # Three outcomes, not two. Collapsing "not applied" into "failed"
+        # reported a healthy Hunyuan mesh (fill 0.97, deliberately left alone)
+        # as [FAILED], telling the user their best result was broken.
+        assert 'solid_status = "failed"' in src
+        assert 'solid_status = "skipped"' in src
+        assert 'elif outcome.repaired:' in src
 
     def test_the_pipeline_warns_the_model_is_unusable(self):
         """The warning is the only thing standing between the user and twenty
@@ -541,3 +599,187 @@ class TestAFailedRepairMustNotLookLikeSuccess:
         src = inspect.getsource(pipeline._run_generative)
         assert "NOT USABLE" in src
         assert "re-running" in src
+
+
+class TestTheSurfaceLandsWhereItShould:
+    """The half-voxel bug, on exact binary grids so nothing else can hide it.
+
+    ``distance_transform_edt`` measures centre to centre, but the interface
+    sits half a voxel in from the last occupied centre: a voxel touching
+    background gets edt == 1 while being 0.5 from the surface. So the raw field
+    is sign*(d + 0.5) and asking for level -n lands at depth n - 0.5 -- half a
+    voxel too far out on every side, at every resolution and every dilation.
+
+    Worth exactly +1.000 voxel of extent, and the dominant term in a real model
+    coming back 8.5% too thick on its thinnest axis. At offset 0 the +-1
+    samples bracket the interface symmetrically and the error vanishes, which
+    is why the index-space alignment test never caught it.
+    """
+
+    #: True extent of the slab below, in voxels.
+    TRUE = 60.0
+
+    def _slab(self):
+        g = np.zeros((100, 100, 100), dtype=bool)
+        g[20:80, 20:80, 20:80] = True
+        return g
+
+    def test_the_level_set_round_trip_is_exact(self):
+        from pixiecad.meshops.solidify import extract_surface
+
+        for offset in (0, 2, 4, 6):
+            for sigma in (0.0, 1.5):
+                s = extract_surface(self._slab(), offset=offset, sigma=sigma)
+                assert s is not None
+                got = float(np.mean(s.extents))
+                want = self.TRUE - 2 * offset
+                assert abs(got - want) < 0.02, (
+                    f"offset {offset} sigma {sigma}: {got:.3f} vs {want:.3f}"
+                )
+
+    def test_the_error_does_not_depend_on_the_dilation(self):
+        """Pins it as a constant, so nobody 'fixes' it with a percentage."""
+        from pixiecad.meshops.solidify import extract_surface
+
+        errs = [
+            float(np.mean(extract_surface(self._slab(), offset=o, sigma=0.0).extents))
+            - (self.TRUE - 2 * o)
+            for o in (2, 4, 8)
+        ]
+        assert max(errs) - min(errs) < 0.02
+
+    def test_smoothing_does_not_move_a_true_sdf(self):
+        """Blurring a locally-linear function leaves its level sets alone.
+        Before the correction, sigma 0 and 1.5 differed by 0.28 voxels."""
+        from pixiecad.meshops.solidify import extract_surface
+
+        a = np.mean(extract_surface(self._slab(), offset=2, sigma=0.0).extents)
+        b = np.mean(extract_surface(self._slab(), offset=2, sigma=1.5).extents)
+        assert abs(float(a) - float(b)) < 0.05
+
+    def test_an_offset_of_two_insets_by_exactly_two(self):
+        """The property that was actually broken: it inset by 1.5."""
+        from pixiecad.meshops.solidify import extract_surface
+
+        zero = extract_surface(self._slab(), offset=0, sigma=0.0)
+        two = extract_surface(self._slab(), offset=2, sigma=0.0)
+        inset = (np.asarray(zero.extents) - np.asarray(two.extents)) / 2.0
+        assert np.allclose(inset, 2.0, atol=0.05), f"inset by {inset}"
+
+
+class TestDimensionalAccuracy:
+    """Known solids must come back their real size.
+
+    The user-facing complaint: "the lighter is always a bit thicker than it
+    actually is". Measured on a real job before the fix, growth per axis in
+    voxels was [-0.93, +1.74, +2.02] -- a constant absolute offset, so the
+    thinnest axis (37% of the longest) paid +8.52% while the longest paid
+    +2.72%. After the fix that job's thinnest axis moved +0.13%.
+
+    Two terms: the half-voxel EDT bug above (exactly removable) and voxelising
+    marking the nearest centre (statistical, mean 0.5, cancelled by
+    SHELL_BIAS). The residual +-0.5 spread is irreducible -- where the surface
+    falls inside its voxel is genuinely unknown at this resolution.
+    """
+
+    SHAPES = {
+        "box": trimesh.creation.box(extents=(1.0, 0.5, 0.3)),
+        "sphere": trimesh.creation.icosphere(subdivisions=4, radius=0.5),
+        "slab": trimesh.creation.box(extents=(1.0, 1.0, 0.1)),
+    }
+
+    @staticmethod
+    def _error_voxels(mesh, divisions, phase=0.0):
+        """Extent error in VOXELS, so the assertion holds at any resolution."""
+        pitch = float(np.max(mesh.extents)) / divisions
+        moved = mesh.copy()
+        moved.apply_translation(np.array([phase, phase * 0.5, phase * 0.25]) * pitch)
+        r = solidify(moved, divisions=divisions, only_if_shattered=False)
+        return (np.asarray(r.mesh.extents) - np.asarray(mesh.extents)) / pitch
+
+    def test_a_known_solid_comes_back_the_right_size(self):
+        for name, mesh in self.SHAPES.items():
+            err = self._error_voxels(mesh, 96)
+            assert np.abs(err).max() < 1.2, f"{name}: {np.round(err, 2)} voxels"
+
+    def test_there_is_no_systematic_growth_across_grid_phases(self):
+        """The calibration, executable. Sweeping the sub-voxel phase is the
+        whole point -- a box at phase 0 reads a clean artefact and would
+        calibrate the bias to the wrong number."""
+        errs = np.array([
+            self._error_voxels(mesh, 72, phase)
+            for mesh in self.SHAPES.values()
+            for phase in (0.0, 0.25, 0.5, 0.75)
+        ])
+        assert -0.7 < errs.mean() < 0.4, f"mean {errs.mean():+.3f} voxels"
+        assert np.abs(errs).max() < 1.2
+
+    def test_the_error_is_constant_in_voxels_not_proportional(self):
+        """Guards against anyone re-fixing this with a percentage."""
+        sphere = self.SHAPES["sphere"]
+        coarse = self._error_voxels(sphere, 64).mean()
+        fine = self._error_voxels(sphere, 128).mean()
+        assert abs(coarse - fine) < 0.4
+
+    def test_a_thin_axis_is_not_thickened(self):
+        """The complaint, in test form. A 0.1-thick slab is the shape that
+        punishes an absolute offset hardest."""
+        err = self._error_voxels(self.SHAPES["slab"], 128)
+        assert abs(err[2]) < 1.0, f"thin axis moved {err[2]:+.2f} voxels"
+
+    def test_a_thin_feature_survives_the_correction(self):
+        """Every surface now moves inward a voxel further than before, so the
+        new risk is eroding thin features away entirely."""
+        from pixiecad.meshops.solidify import extract_surface
+
+        grid = np.zeros((40, 40, 40), dtype=bool)
+        grid[17:23, 5:35, 5:35] = True  # 6 voxels thick
+        s = extract_surface(grid, offset=0, sigma=0.0)
+        assert s is not None
+        assert abs(float(np.min(s.extents)) - 6.0) < 1.0
+
+
+class TestTheGridIsAffordable:
+    """256^3 on every job only works because voxelising is chunked.
+
+    trimesh subdivides the WHOLE mesh until every edge is under half a voxel
+    and holds all of it at once: 2.6 GB on a 1.9M-face input at 256, which is
+    65% of the module's entire footprint and what made running at full
+    resolution unaffordable. Chunked it is 311 MB, and the grids are identical.
+    """
+
+    def test_chunked_voxelisation_matches_trimesh(self):
+        from pixiecad.meshops.solidify import _voxelize
+
+        mesh = trimesh.creation.icosphere(subdivisions=3, radius=0.5)
+        pitch = float(np.max(mesh.extents)) / 48
+        grid, lo = _voxelize(mesh, pitch, pad=2)
+        ours = {tuple(v) for v in (np.argwhere(grid) + lo)}
+
+        vox = mesh.voxelized(pitch=pitch)
+        origin = np.round(np.asarray(vox.transform)[:3, 3] / pitch).astype(np.int64)
+        theirs = {tuple(v) for v in (np.argwhere(vox.matrix) + origin)}
+        assert ours == theirs, f"{len(ours ^ theirs)} voxels differ"
+
+    def test_the_padding_keeps_the_object_off_the_border(self):
+        """binary_fill_holes treats the border as outside, so an object flush
+        against it drains and the whole repair silently produces a shell."""
+        from pixiecad.meshops.solidify import _voxelize
+
+        mesh = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        grid, _ = _voxelize(mesh, float(np.max(mesh.extents)) / 32, pad=5)
+        assert not grid[0].any() and not grid[-1].any()
+        assert not grid[:, 0].any() and not grid[:, :, 0].any()
+
+    def test_it_does_not_hold_the_whole_subdivision(self):
+        """Coarse, but it is the only thing that would catch a regression to
+        mesh.voxelized on the production path."""
+        import resource
+
+        from pixiecad.meshops.solidify import _voxelize
+
+        mesh = trimesh.creation.icosphere(subdivisions=5, radius=0.5)
+        before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        _voxelize(mesh, float(np.max(mesh.extents)) / 128, pad=4)
+        grew_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) / 1e6
+        assert grew_mb < 500, f"voxelisation grew RSS by {grew_mb:.0f} MB"

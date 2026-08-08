@@ -232,13 +232,17 @@ def _run_generative(
         t_solid = time.monotonic()
         try:
             from .meshops.solidify import FILL_FLOOR as SOLIDIFY_FILL_FLOOR
+            from .meshops.solidify import MAX_DIVISIONS as SOLIDIFY_MAX_DIVISIONS
             from .meshops.solidify import solidify
 
-            # The grid resolution has to follow the face budget: solidify
-            # replaces the mesh, so its output is a ceiling decimation cannot
-            # raise. A job asking for 300,000 came back with 89,844 because
-            # the grid was fixed at 128.
-            outcome = solidify(mesh, target_faces=spec.target_faces)
+            # No target_faces. The grid used to follow the face budget so the
+            # output could not undershoot it -- but every error solidify makes
+            # is a fixed number of VOXELS, so that made dimensional accuracy a
+            # function of how many triangles the user asked for. A 20,000-face
+            # job got a 64^3 grid and came back 8.5% too thick on its thinnest
+            # axis. It now runs at full resolution and decimate takes the count
+            # down, which is what decimate is for.
+            outcome = solidify(mesh)
             if outcome.applied:
                 mesh = outcome.mesh
                 if outcome.repaired:
@@ -261,10 +265,34 @@ def _run_generative(
                         f"Generation is stochastic -- re-running the same photos "
                         f"usually gives a good mesh."
                     )
+                # The grid is a ceiling decimation cannot raise, and dropping
+                # target_faces removed the retry that used to guard it. At
+                # ~9.5 faces per division squared a 256 grid yields about
+                # 620,000, so only a very large budget can undershoot -- and
+                # when it does the user should hear it from here rather than
+                # comparing face counts and guessing.
+                if spec.target_faces and len(mesh.faces) < spec.target_faces * 0.8:
+                    warnings.append(
+                        f"the rebuilt surface has {len(mesh.faces):,} faces, "
+                        f"short of the {spec.target_faces:,} asked for: the voxel "
+                        f"grid is capped at {SOLIDIFY_MAX_DIVISIONS}^3 and "
+                        "decimation can only remove faces, not add them"
+                    )
+            # Three outcomes, not two. A mesh that never needed repairing is
+            # the BEST case -- Hunyuan output encloses 0.97 of its hull and is
+            # deliberately left alone -- and reporting that as [FAILED] tells
+            # the user their good model is broken. Only a repair that was
+            # attempted and did not close the surface is a failure.
+            if outcome.applied and outcome.repaired:
+                solid_status = "ok"
+            elif outcome.repaired:
+                solid_status = "skipped"
+            else:
+                solid_status = "failed"
             stages.append(
                 StageOutcome(
                     "solidify",
-                    "ok" if outcome.applied and outcome.repaired else "failed",
+                    solid_status,
                     outcome.reason,
                     time.monotonic() - t_solid,
                 )

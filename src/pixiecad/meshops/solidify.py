@@ -148,18 +148,23 @@ def looks_shattered(mesh: trimesh.Trimesh, *, fill_threshold: float = 0.15) -> b
     return fill_ratio(mesh) < fill_threshold
 
 
-#: Faces produced per division squared. Marching cubes triangulates a surface,
-#: so the count grows with the square of the grid resolution, not its cube.
+#: Grid resolution along the longest axis. Deliberately NOT derived from the
+#: face budget any more.
 #:
-#: This is only a starting guess. Measured on real output it is not constant --
-#: about 5.5 below ~150 divisions and 11.5 above, because finer grids resolve
-#: detail the coarse ones smooth away, and it varies per object besides. So the
-#: first pass uses this and then _refine measures what actually came out and
-#: corrects, rather than trusting a number that is wrong half the time.
-FACES_PER_DIVISION_SQ = 11.5
-
-#: 256 costs about 3.4 GB and 20 s. Past that the local memory budget on a
-#: 16 GB machine is the binding constraint, not the mesh.
+#: It used to be: divisions = sqrt(target_faces / 11.5), so a job asking for
+#: 20,000 faces got a 64^3 grid where one voxel is 1.6% of the object. Since
+#: every error this module makes is a fixed number of VOXELS, that made
+#: dimensional accuracy a function of how many triangles the user happened to
+#: ask for -- a 20k job came back 8.5% too thick on its thinnest axis. The grid
+#: now always runs as fine as the machine affords and ``decimate_to_budget``
+#: takes the face count down afterwards, which is what it was always for.
+#:
+#: 256 yields ~9.5 * 256^2 = 620k faces, above any budget the worker can
+#: deliver, so nothing downstream is starved. Cost measured end to end on a
+#: 1.9M-face input: 2.06 GB and ~5 s with the chunked voxeliser below (3.91 GB
+#: without it). Past 256 the distance transforms grow as D^3 for a fraction of
+#: a percent of accuracy, so this is also the ceiling.
+DEFAULT_DIVISIONS = 256
 MAX_DIVISIONS = 256
 MIN_DIVISIONS = 64
 
@@ -177,23 +182,103 @@ MIN_DIVISIONS = 64
 #:
 #: 1.5 is where the noise is fully suppressed; past it the curve flattens and
 #: only the error keeps growing. The cost is that a genuinely sharp convex edge
-#: picks up a fillet of roughly this radius -- 0.6% of the object at 235
-#: divisions, which is smaller than the voxel grid's own fidelity.
+#: picks up a fillet of roughly this radius.
+#:
+#: Note this blur does NOT move the surface, now that the field is a true
+#: signed distance: blurring a locally-linear function leaves its level sets
+#: where they were. Measured, dilate 2: sigma 0 and sigma 1.5 agree to 0.000
+#: voxels. Before the half-voxel correction below they differed by 0.28.
 SMOOTH_SIGMA = 1.5
 
+#: Voxelising is extensive, and this cancels the average of it.
+#:
+#: ``voxelize_subdivide`` marks the NEAREST voxel centre to each surface sample
+#: (``round(v / pitch)``), so the marked voxel's outer face lands somewhere in
+#: [0, 1) voxels beyond the true surface -- uniformly distributed, expectation
+#: exactly 0.5. Measured over 3 shapes x 4 sub-voxel phases x 3 axes at 72
+#: divisions, after the EDT correction in ``extract_surface``:
+#:
+#:     bias 0.0 -> mean +0.821 voxels, rms 0.90
+#:     bias 0.5 -> mean -0.191 voxels, rms 0.42
+#:
+#: The residual +-0.5 spread is irreducible: where the surface falls inside its
+#: voxel is genuinely unknown at this resolution. This cancels the mean, not
+#: the spread. Derived rather than fitted -- a curve fit on three shapes gave
+#: 0.41, and 0.09 voxels is 0.03% of the object at 256 divisions.
+SHELL_BIAS = 0.5
 
-def divisions_for_target(target_faces: int | None) -> int:
-    """Grid resolution that yields roughly ``target_faces`` after extraction.
+#: Dilation starts at divisions/64 rather than divisions/45.
+#:
+#: Dilation is what bridges the gaps between fragments, and it is also what
+#: destroys detail: dilate-then-fill welds shut any gap or concavity narrower
+#: than twice this radius. At 256 divisions the old rule gave 6 voxels, a
+#: closing radius of 2.3% of the longest axis -- wide enough to swallow a
+#: lighter's lid seam. Starting at 4 (1.6%) keeps more, and the escalation in
+#: ``solidify`` recovers the cases that genuinely need more, so nothing is
+#: traded away permanently.
+DILATE_DIVISOR = 64
 
-    Solidify replaces the mesh outright, so its resolution sets a ceiling the
-    face budget cannot exceed -- decimation only removes faces. A job that
-    asked for 300,000 came back with 89,844 because the grid was fixed at 128,
-    and nothing downstream could recover the difference.
+
+def start_dilate(divisions: int) -> int:
+    """First dilation to try at this resolution, in voxels."""
+    return max(2, -(-divisions // DILATE_DIVISOR))
+
+
+def _dilation_schedule(start: int) -> list[int]:
+    """Dilations to try, in order, ending at ``MAX_DILATE``."""
+    out: list[int] = []
+    d = start
+    while d < MAX_DILATE:
+        out.append(d)
+        d = max(d + 2, d * 2)
+    out.append(MAX_DILATE)
+    return out
+
+
+def _voxelize(
+    mesh: trimesh.Trimesh, pitch: float, *, pad: int, chunk: int = 4000
+) -> tuple[np.ndarray, np.ndarray]:
+    """Padded boolean occupancy grid, plus the voxel index of its [0,0,0].
+
+    Equivalent to ``mesh.voxelized(pitch).matrix`` -- same rule, same result --
+    but built a few thousand faces at a time. ``trimesh`` subdivides the WHOLE
+    mesh until every edge is under half a voxel and holds all of it at once,
+    which on a 1.9M-face input at 256 divisions costs 2.6 GB in that one call:
+    65% of the module's entire footprint, and the thing that made running at
+    256 unaffordable. Chunked it is 311 MB, and the grids are bit-identical.
+
+    ``pad`` is in voxels and is applied on every side, leaving room to dilate
+    without the object touching the border -- ``binary_fill_holes`` treats the
+    border as outside, so an object flush against it drains.
     """
-    if not target_faces or target_faces <= 0:
-        return 128
-    est = int((target_faces / FACES_PER_DIVISION_SQ) ** 0.5)
-    return max(MIN_DIVISIONS, min(MAX_DIVISIONS, est))
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces)
+
+    lo = np.floor(np.asarray(mesh.bounds[0]) / pitch).astype(np.int64) - pad
+    hi = np.ceil(np.asarray(mesh.bounds[1]) / pitch).astype(np.int64) + pad
+    grid = np.zeros(tuple((hi - lo + 1).tolist()), dtype=bool)
+    limit = np.asarray(grid.shape, dtype=np.int64) - 1
+
+    for start in range(0, len(faces), chunk):
+        block = faces[start : start + chunk]
+        # Renumber to just this block's vertices so a 1.9M-vertex array is not
+        # copied per chunk.
+        used, remap = np.unique(block, return_inverse=True)
+        sub_v, _ = trimesh.remesh.subdivide_to_size(
+            verts[used],
+            remap.reshape(block.shape),
+            # Half a voxel, so no triangle can step over one uninterrupted.
+            max_edge=pitch * 0.5,
+            # trimesh defaults to 10 doublings; at 256 divisions a single edge
+            # spanning the object needs 9, so the default is one step from
+            # under-subdividing and silently leaving holes in the grid.
+            max_iter=20,
+        )
+        idx = np.round(sub_v / pitch).astype(np.int64) - lo
+        np.clip(idx, 0, limit, out=idx)
+        grid[idx[:, 0], idx[:, 1], idx[:, 2]] = True
+
+    return grid, lo
 
 
 def extract_surface(
@@ -213,6 +298,23 @@ def extract_surface(
 
     # Signed: positive outside, negative inside, zero on the dilated boundary.
     field = ndimage.distance_transform_edt(~grid) - ndimage.distance_transform_edt(grid)
+
+    # The distance transform measures CENTRE TO CENTRE, but the interface sits
+    # half a voxel in from the last occupied centre. A voxel touching
+    # background gets edt == 1 while being 0.5 from the surface, so the raw
+    # field is sign * (d + 0.5) and asking for level -n lands at true depth
+    # n - 0.5: half a voxel too far out, on every side.
+    #
+    # This was worth exactly +1.000 voxel of extent on an exact binary slab,
+    # for every dilation >= 1 and at every resolution -- the dominant term in
+    # a real model coming back 8.5% too thick on its thinnest axis. At
+    # offset == 0 the +-1 samples bracket the interface symmetrically so the
+    # error vanishes, which is why the index-space alignment test never saw it.
+    #
+    # Done in place: at 256 divisions a second copy of this array is 200 MB.
+    field[field > 0] -= 0.5
+    field[field < 0] += 0.5
+
     if sigma > 0:
         field = ndimage.gaussian_filter(field, sigma=sigma)
 
@@ -235,48 +337,27 @@ def solidify(
     mesh: trimesh.Trimesh,
     *,
     divisions: int | None = None,
-    target_faces: int | None = None,
     dilate: int | None = None,
     smooth_sigma: float = SMOOTH_SIGMA,
     only_if_shattered: bool = True,
     fill_threshold: float = 0.15,
-    _retry: bool = True,
 ) -> SolidifyResult:
     """Close a surface into a watertight solid.
 
-    ``divisions`` is resolution along the longest axis. Leave it None and pass
-    ``target_faces`` instead: the grid then produces enough geometry for the
-    budget the user actually asked for, since this mesh replaces theirs and
-    decimation downstream can only take faces away.
+    ``divisions`` is resolution along the longest axis, defaulting to
+    ``DEFAULT_DIVISIONS`` regardless of any face budget -- see that constant
+    for why it used to follow the budget and why that was wrong.
 
-    ``dilate`` is how many voxels of gap to bridge. Left None it scales with
-    ``divisions`` so the bridged distance stays constant in world units;
-    raise it for a more shattered input, at the cost of filling narrower
-    concavities.
+    ``dilate`` is how many voxels of gap to bridge. Left None it starts at
+    ``start_dilate(divisions)`` and escalates only if the result does not
+    enclose anything, so fine detail is not given away up front.
 
     ``smooth_sigma`` is the distance-field blur, in voxels. Set it to 0 for a
-    faithful-but-noisy surface; it is what keeps curved regions from coming out
-    as staircases.
+    faithful-but-noisier surface; it is what keeps curved regions from coming
+    out as staircases, and it does not move the surface.
     """
     if divisions is None:
-        divisions = divisions_for_target(target_faces)
-    if dilate is None:
-        # Dilation must scale with resolution: the gaps are a fixed size in
-        # world units, so bridging them takes more voxels as the voxels shrink.
-        # Holding it at 2 while raising divisions silently stopped sealing the
-        # interior -- fill fell from 0.955 at 128 to 0.093 at 256, straight
-        # back to the hollow mesh this module exists to fix.
-        #
-        # The relationship is not linear, so this is measured rather than
-        # derived. Minimum dilation that seals, by divisions:
-        #
-        #     128 -> 2      160 -> 3      192 -> 3      256 -> 6
-        #
-        # divisions/45 covers all of them with a margin, and over-dilating is
-        # cheap: at 128 divisions everything from d2 to d8 gives the same 0.96
-        # fill. Erosion undoes the size change; what a larger radius does cost
-        # is concavities narrower than itself.
-        dilate = max(2, -(-divisions // 45))
+        divisions = DEFAULT_DIVISIONS
     before_fill = fill_ratio(mesh)
     before_components = count_components(mesh)
 
@@ -301,91 +382,61 @@ def solidify(
         )
 
     pitch = extent / max(16, divisions)
-    voxels = mesh.voxelized(pitch=pitch)
+    # Padded for the LARGEST dilation we might escalate to, so the same grid
+    # serves every attempt and voxelising happens once -- it is the expensive
+    # step (~4.5 s), and the old recursive escalation paid it again each time.
+    base, lo = _voxelize(mesh, pitch, pad=MAX_DILATE + 2)
 
-    pad = dilate + 2
-    grid = np.pad(voxels.matrix, pad)
-    grid = ndimage.binary_dilation(grid, iterations=dilate)
-    grid = ndimage.binary_fill_holes(grid)
-
-    if not grid.any():
+    if not base.any():
         return SolidifyResult(
             mesh, False, "solidify produced an empty grid", before_components,
             before_components, before_fill, before_fill, repaired=False,
         )
 
-    solid = extract_surface(grid, offset=dilate, sigma=smooth_sigma)
-    if solid is None:
+    schedule = _dilation_schedule(start_dilate(divisions) if dilate is None else dilate)
+    best: trimesh.Trimesh | None = None
+    best_fill = -1.0
+    best_dilate = schedule[0]
+
+    for d in schedule:
+        grid = ndimage.binary_fill_holes(ndimage.binary_dilation(base, iterations=d))
+        # offset carries the shell bias as well as the dilation, so the surface
+        # lands where the input's actually was rather than a voxel outside it.
+        solid = extract_surface(grid, offset=d + SHELL_BIAS, sigma=smooth_sigma)
+        if solid is None:
+            # A dilation too small to seal leaves thin shells that the inward
+            # offset erodes away completely. That used to end the whole call;
+            # now it is just a reason to try a wider radius, which matters far
+            # more now that the starting radius is deliberately small.
+            continue
+
+        solid.vertices = (solid.vertices + lo) * pitch
+        after = fill_ratio(solid)
+        if after > best_fill:
+            best, best_fill, best_dilate = solid, after, d
+        # Enclosing something AND being a single closed body. A fill that
+        # leaked through the gaps leaves an inner surface too, so the component
+        # count catches an under-sealed body that the fill alone would pass.
+        if after >= FILL_FLOOR and count_components(solid) == 1:
+            break
+
+    if best is None:
         return SolidifyResult(
-            mesh, False, f"could not close this surface: nothing survives eroding "
-            f"{dilate} voxels. This is a bad generation, not a tuning problem. "
-            f"Re-run it.", before_components,
-            before_components, before_fill, before_fill, repaired=False,
+            mesh, False,
+            f"could not close this surface: nothing survives eroding even "
+            f"{schedule[-1]} voxels. This is a bad generation, not a tuning "
+            f"problem. Re-run it.",
+            before_components, before_components, before_fill, before_fill,
+            repaired=False,
         )
 
-    # marching_cubes comes back in voxel index space; put it back in world
-    # coordinates, then undo the padding that was added to give room to dilate.
-    solid.apply_transform(voxels.transform)
-    solid.vertices -= pad * pitch
-
-    # One correction pass. The face count a grid yields varies by object, so
-    # rather than trust the estimate, measure it and rescale from what this
-    # mesh actually produced -- but only when we undershot badly enough to
-    # matter, since overshooting is free (decimation removes the excess).
-    if (
-        target_faces
-        and _retry
-        and len(solid.faces) < target_faces * 0.8
-        and divisions < MAX_DIVISIONS
-    ):
-        observed = len(solid.faces) / (divisions * divisions)
-        if observed > 0:
-            better = int((target_faces / observed) ** 0.5)
-            better = max(divisions + 8, min(MAX_DIVISIONS, better))
-            if better > divisions:
-                return solidify(
-                    mesh,
-                    divisions=better,
-                    target_faces=target_faces,
-                    # dilate=None, NOT the value computed for the old
-                    # resolution: the retry runs at a finer grid, and reusing
-                    # the coarse dilation stops bridging the gaps entirely --
-                    # it put fill back to 0.09, undoing the whole repair.
-                    dilate=None,
-                    smooth_sigma=smooth_sigma,
-                    only_if_shattered=False,
-                    fill_threshold=fill_threshold,
-                    _retry=False,
-                )
-
-    after_fill = fill_ratio(solid)
-
-    # Escalate the dilation while the interior is clearly still draining out.
-    # The rule that sets `dilate` from `divisions` is calibrated on one mesh,
-    # and how wide the gaps are is a property of the GENERATION, not of the
-    # grid -- so it is measured here rather than trusted. Doubling is cheap
-    # relative to the voxelisation that has already happened.
-    if after_fill < FILL_FLOOR and dilate < MAX_DILATE:
-        bigger = solidify(
-            mesh,
-            divisions=divisions,
-            target_faces=target_faces,
-            dilate=min(MAX_DILATE, dilate * 2),
-            smooth_sigma=smooth_sigma,
-            only_if_shattered=False,
-            fill_threshold=fill_threshold,
-            _retry=False,
-        )
-        # Keep whichever actually enclosed more. A larger radius normally
-        # helps, but it also swallows concavities, so it has to earn the swap.
-        if bigger.applied and bigger.fill_after > after_fill:
-            return bigger
-
-    repaired = after_fill >= FILL_FLOOR
+    repaired = best_fill >= FILL_FLOOR
+    welded = 200.0 * best_dilate / divisions
     if repaired:
         reason = (
-            f"solidified at {divisions}^3 (dilate {dilate}): "
-            f"fill {before_fill:.3f} -> {after_fill:.3f}"
+            f"solidified at {divisions}^3 (dilate {best_dilate}): "
+            f"fill {before_fill:.3f} -> {best_fill:.3f}; "
+            f"gaps under {welded:.1f}% of the longest axis are closed"
         )
     else:
         # Say what it is. A watertight, single-component, correctly budgeted
@@ -393,18 +444,19 @@ def solidify(
         # place the truth is available.
         reason = (
             f"could not close this surface: fill {before_fill:.3f} -> "
-            f"{after_fill:.3f} at {divisions}^3 even with dilation {dilate}. "
-            "The generated surface is too fragmented to enclose anything -- "
-            "this is a bad generation, not a tuning problem. Re-run it."
+            f"{best_fill:.3f} at {divisions}^3 even with dilation "
+            f"{schedule[-1]}. The generated surface is too fragmented to "
+            "enclose anything -- this is a bad generation, not a tuning "
+            "problem. Re-run it."
         )
 
     return SolidifyResult(
-        mesh=solid,
+        mesh=best,
         applied=True,
         reason=reason,
         components_before=before_components,
-        components_after=count_components(solid),
+        components_after=count_components(best),
         fill_before=before_fill,
-        fill_after=after_fill,
+        fill_after=best_fill,
         repaired=repaired,
     )
