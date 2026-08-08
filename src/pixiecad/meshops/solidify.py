@@ -69,6 +69,25 @@ import numpy as np
 import trimesh
 
 
+#: Below this the repair did not work, whatever the other numbers say.
+#:
+#: A healthy result lands at 0.95+; Hunyuan output that never needed repairing
+#: sits at 0.42-0.88. A run that ends at 0.05 produced a watertight mesh with
+#: one component and every stage green, and it was a blob -- the surface was
+#: too fragmented to bridge and the interior drained out through the gaps.
+#: Measured on that mesh, no dilation rescued it: 6 -> 0.047, 8 -> 0.067,
+#: 10 -> 0.137, 14 -> 0.204, while a good generation of the same object from
+#: the same photos reached 0.966 at dilation 6. So a low fill means the
+#: GENERATION is unusable, not that the repair needs tuning, and the only
+#: useful response is to say so before twenty minutes of texturing go into it.
+FILL_FLOOR = 0.35
+
+#: Dilation is doubled up to here while the fill is unacceptable. Past this the
+#: bridged distance is a sixth of the object and any real concavity is gone --
+#: at that point a better result would not be the object anyway.
+MAX_DILATE = 16
+
+
 @dataclass
 class SolidifyResult:
     mesh: trimesh.Trimesh
@@ -78,6 +97,10 @@ class SolidifyResult:
     components_after: int
     fill_before: float
     fill_after: float
+    #: False when the surface could not be closed into a plausible body. The
+    #: mesh is still returned -- it is no worse than the input -- but the
+    #: caller must not present it as a repaired model.
+    repaired: bool = True
 
 
 def count_components(mesh: trimesh.Trimesh) -> int:
@@ -274,7 +297,7 @@ def solidify(
     if not np.isfinite(extent) or extent <= 0:
         return SolidifyResult(
             mesh, False, "degenerate bounds", before_components,
-            before_components, before_fill, before_fill,
+            before_components, before_fill, before_fill, repaired=False,
         )
 
     pitch = extent / max(16, divisions)
@@ -288,14 +311,16 @@ def solidify(
     if not grid.any():
         return SolidifyResult(
             mesh, False, "solidify produced an empty grid", before_components,
-            before_components, before_fill, before_fill,
+            before_components, before_fill, before_fill, repaired=False,
         )
 
     solid = extract_surface(grid, offset=dilate, sigma=smooth_sigma)
     if solid is None:
         return SolidifyResult(
-            mesh, False, f"nothing survives eroding {dilate} voxels", before_components,
-            before_components, before_fill, before_fill,
+            mesh, False, f"could not close this surface: nothing survives eroding "
+            f"{dilate} voxels. This is a bad generation, not a tuning problem. "
+            f"Re-run it.", before_components,
+            before_components, before_fill, before_fill, repaired=False,
         )
 
     # marching_cubes comes back in voxel index space; put it back in world
@@ -333,15 +358,53 @@ def solidify(
                     _retry=False,
                 )
 
+    after_fill = fill_ratio(solid)
+
+    # Escalate the dilation while the interior is clearly still draining out.
+    # The rule that sets `dilate` from `divisions` is calibrated on one mesh,
+    # and how wide the gaps are is a property of the GENERATION, not of the
+    # grid -- so it is measured here rather than trusted. Doubling is cheap
+    # relative to the voxelisation that has already happened.
+    if after_fill < FILL_FLOOR and dilate < MAX_DILATE:
+        bigger = solidify(
+            mesh,
+            divisions=divisions,
+            target_faces=target_faces,
+            dilate=min(MAX_DILATE, dilate * 2),
+            smooth_sigma=smooth_sigma,
+            only_if_shattered=False,
+            fill_threshold=fill_threshold,
+            _retry=False,
+        )
+        # Keep whichever actually enclosed more. A larger radius normally
+        # helps, but it also swallows concavities, so it has to earn the swap.
+        if bigger.applied and bigger.fill_after > after_fill:
+            return bigger
+
+    repaired = after_fill >= FILL_FLOOR
+    if repaired:
+        reason = (
+            f"solidified at {divisions}^3 (dilate {dilate}): "
+            f"fill {before_fill:.3f} -> {after_fill:.3f}"
+        )
+    else:
+        # Say what it is. A watertight, single-component, correctly budgeted
+        # blob passes every other check in the pipeline, so this is the only
+        # place the truth is available.
+        reason = (
+            f"could not close this surface: fill {before_fill:.3f} -> "
+            f"{after_fill:.3f} at {divisions}^3 even with dilation {dilate}. "
+            "The generated surface is too fragmented to enclose anything -- "
+            "this is a bad generation, not a tuning problem. Re-run it."
+        )
+
     return SolidifyResult(
         mesh=solid,
         applied=True,
-        reason=(
-            f"solidified at {divisions}^3 (dilate {dilate}): "
-            f"fill {before_fill:.3f} -> {fill_ratio(solid):.3f}"
-        ),
+        reason=reason,
         components_before=before_components,
         components_after=count_components(solid),
         fill_before=before_fill,
-        fill_after=fill_ratio(solid),
+        fill_after=after_fill,
+        repaired=repaired,
     )

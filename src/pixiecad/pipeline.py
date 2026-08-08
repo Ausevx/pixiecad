@@ -231,6 +231,7 @@ def _run_generative(
     if solidify_generated:
         t_solid = time.monotonic()
         try:
+            from .meshops.solidify import FILL_FLOOR as SOLIDIFY_FILL_FLOOR
             from .meshops.solidify import solidify
 
             # The grid resolution has to follow the face budget: solidify
@@ -240,16 +241,30 @@ def _run_generative(
             outcome = solidify(mesh, target_faces=spec.target_faces)
             if outcome.applied:
                 mesh = outcome.mesh
-                warnings.append(
-                    f"generated surface was not a solid "
-                    f"({outcome.components_before:,} disconnected pieces "
-                    f"enclosing {outcome.fill_before:.2f} of its hull); "
-                    f"rebuilt as a watertight body ({outcome.fill_after:.2f})"
-                )
+                if outcome.repaired:
+                    warnings.append(
+                        f"generated surface was not a solid "
+                        f"({outcome.components_before:,} disconnected pieces "
+                        f"enclosing {outcome.fill_before:.2f} of its hull); "
+                        f"rebuilt as a watertight body ({outcome.fill_after:.2f})"
+                    )
+                else:
+                    # This must not read as a success. The output of a failed
+                    # repair is watertight, single-component and exactly on
+                    # budget -- it passes every downstream check and is a blob.
+                    # Reported green once, and the user spent twenty minutes
+                    # texturing it before finding out.
+                    warnings.append(
+                        f"THE MODEL IS NOT USABLE: the generated surface could "
+                        f"not be closed (encloses {outcome.fill_after:.2f} of "
+                        f"its hull, healthy is above {SOLIDIFY_FILL_FLOOR:.2f}). "
+                        f"Generation is stochastic -- re-running the same photos "
+                        f"usually gives a good mesh."
+                    )
             stages.append(
                 StageOutcome(
                     "solidify",
-                    "ok" if outcome.applied else "skipped",
+                    "ok" if outcome.applied and outcome.repaired else "failed",
                     outcome.reason,
                     time.monotonic() - t_solid,
                 )

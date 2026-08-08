@@ -452,3 +452,92 @@ class TestTheWorkerGetsTheFaceBudget:
         from pixiecad.generative.trellis_remote import TRELLIS_MESH_PROFILES
 
         assert TRELLIS_MESH_PROFILES == {"hd", "game_ready"}
+
+
+class TestAFailedRepairMustNotLookLikeSuccess:
+    """A blob passes every check the pipeline has.
+
+    The output of a failed repair is watertight, one connected component, and
+    exactly on the face budget -- so sanity, clean, decimate, bake and export
+    all report ok. A real run went out as [OK] at every stage and the user
+    spent twenty minutes texturing a melted blob before finding out.
+
+    Measured on that generation: no dilation rescued it (6 -> 0.047,
+    8 -> 0.067, 10 -> 0.137, 14 -> 0.204), while a good generation of the SAME
+    object from the SAME photos and settings reached 0.966 at dilation 6. Low
+    fill therefore means the generation is unusable, not that the repair needs
+    tuning -- and the pipeline has to say so before the expensive stages run.
+    """
+
+    def test_a_good_repair_is_marked_repaired(self):
+        r = solidify(_perforated(), only_if_shattered=False)
+        assert r.repaired
+        assert r.fill_after > 0.9
+
+    def test_an_unclosable_surface_is_not_marked_repaired(self):
+        """_hollow is sparse enough that no affordable dilation bridges it --
+        the synthetic stand-in for the bad generation."""
+        r = solidify(_hollow(), only_if_shattered=False)
+        assert not r.repaired, f"fill {r.fill_after:.3f} was accepted"
+
+    def test_the_reason_says_it_failed_and_what_to_do(self):
+        r = solidify(_hollow(), only_if_shattered=False)
+        assert "could not close" in r.reason
+        assert "re-run" in r.reason.lower()
+
+    def test_the_mesh_is_still_returned(self):
+        """No worse than the input, and the caller may still want to look."""
+        r = solidify(_hollow(), only_if_shattered=False)
+        assert r.mesh is not None and len(r.mesh.faces) > 0
+
+    def test_the_low_fill_branch_reports_the_same_way(self):
+        """The other failure shape: the surface DOES extract, it just encloses
+        nothing. Scattered solid boxes reproduce it deterministically -- they
+        survive erosion, so extraction succeeds, but they occupy a fraction of
+        their own convex hull. This is the branch the real blob took."""
+        boxes = [
+            trimesh.creation.box(extents=(0.08, 0.08, 0.08)).apply_translation(t)
+            for t in ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1))
+        ]
+        scattered = trimesh.util.concatenate(boxes)
+        r = solidify(scattered, divisions=96, only_if_shattered=False)
+        assert r.applied, "the surface must extract; this is not the erosion path"
+        assert not r.repaired, f"fill {r.fill_after:.3f} was accepted"
+        assert "could not close" in r.reason and "re-run" in r.reason.lower()
+
+    def test_dilation_escalates_before_giving_up(self):
+        """The rule setting dilation from divisions is calibrated on one mesh;
+        how wide the gaps are is a property of the generation. On the real bad
+        mesh escalation moved fill 0.047 -> 0.225 -- not enough, but it must be
+        tried before declaring failure."""
+        from pixiecad.meshops.solidify import MAX_DILATE
+
+        r = solidify(_hollow(), divisions=128, only_if_shattered=False)
+        assert str(MAX_DILATE) in r.reason or r.fill_after > 0.0
+
+    def test_the_floor_sits_between_a_blob_and_real_output(self):
+        """Hunyuan output that never needed repair sits at 0.42-0.88, a good
+        repair at 0.95+, the blob at 0.05-0.22. The floor must not reject
+        legitimate geometry."""
+        from pixiecad.meshops.solidify import FILL_FLOOR
+
+        assert 0.25 < FILL_FLOOR < 0.42
+
+    def test_the_pipeline_marks_the_stage_failed(self):
+        import inspect
+
+        from pixiecad import pipeline
+
+        src = inspect.getsource(pipeline._run_generative)
+        assert 'outcome.applied and outcome.repaired else "failed"' in src
+
+    def test_the_pipeline_warns_the_model_is_unusable(self):
+        """The warning is the only thing standing between the user and twenty
+        minutes of texturing."""
+        import inspect
+
+        from pixiecad import pipeline
+
+        src = inspect.getsource(pipeline._run_generative)
+        assert "NOT USABLE" in src
+        assert "re-running" in src
