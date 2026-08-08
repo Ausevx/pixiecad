@@ -202,6 +202,40 @@ if sudo docker image inspect "$IMG" >/dev/null 2>&1; then
     sudo docker rm pixiecad-simplifyfix >/dev/null
     echo "  simplify_quadric_decimation patched OK"
   fi
+
+  # The paint stage remeshes before texturing, to a target_count HARDCODED at
+  # 40,000, and we then publish that mesh as the model. So a job that asked for
+  # 300,000 faces, built them and exported them, came back with 39,997 the
+  # moment texturing was on -- and the only clue was a face count.
+  #
+  # PixieCAD passes -e HUNYUAN_SIMPLIFY_TARGET, but the image had no code to
+  # read it: the variable was set on every run and did nothing at all for weeks.
+  # Teach the image to honour it, defaulting to the upstream 40,000.
+  if sudo docker run --rm "$IMG" grep -q "HUNYUAN_SIMPLIFY_TARGET" \
+       /opt/hunyuan/hy3dpaint/utils/simplify_mesh_utils.py 2>/dev/null; then
+    echo "  HUNYUAN_SIMPLIFY_TARGET already honoured in $IMG"
+  else
+    echo "  patching $IMG to honour HUNYUAN_SIMPLIFY_TARGET ..."
+    sudo docker rm -f pixiecad-targetfix >/dev/null 2>&1 || true
+    sudo docker run --name pixiecad-targetfix "$IMG" python -c "
+import pathlib
+p = pathlib.Path(\"/opt/hunyuan/hy3dpaint/utils/simplify_mesh_utils.py\")
+s = p.read_text()
+s = s.replace(\"import trimesh\", \"import os\nimport trimesh\", 1)
+s = s.replace(
+    \"def mesh_simplify_trimesh(inputpath, outputpath, target_count=40000):\",
+    \"def mesh_simplify_trimesh(inputpath, outputpath, target_count=None):\n\"
+    \"    if target_count is None:\n\"
+    \"        target_count = int(os.environ.get(\x27HUNYUAN_SIMPLIFY_TARGET\x27, 40000))\",
+)
+p.write_text(s)
+"
+    sudo docker commit pixiecad-targetfix "$IMG" >/dev/null
+    sudo docker rm pixiecad-targetfix >/dev/null
+    sudo docker run --rm "$IMG" grep -q "HUNYUAN_SIMPLIFY_TARGET" \
+      /opt/hunyuan/hy3dpaint/utils/simplify_mesh_utils.py \
+      && echo "  HUNYUAN_SIMPLIFY_TARGET patched OK"
+  fi
 fi
 ' || echo "WARNING: dependency check failed; texturing or baking may not work"
 

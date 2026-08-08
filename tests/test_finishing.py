@@ -479,3 +479,74 @@ fake() {
             "local disk and outgoing traffic has been disabled."
         )
         assert re.search(HF_CACHE_MISS, real)
+
+
+class TestThePaintImageMustHonourTheBudget:
+    """Passing an env var the image cannot read is worse than not passing it.
+
+    PixieCAD sends -e HUNYUAN_SIMPLIFY_TARGET so the paint stage keeps the
+    user's face budget. The image had NO code reading that variable:
+    mesh_simplify_trimesh takes target_count=40000 as a hardcoded default and
+    remesh_mesh never passes one. So the flag was set on every textured run and
+    did nothing, and a 300,000-face job silently shipped 39,997 faces with only
+    a face count as the clue. launch_from_image.sh now patches the image.
+    """
+
+    def test_the_launch_script_patches_the_image_to_read_it(self):
+        from pathlib import Path
+
+        script = Path("scripts/launch_from_image.sh").read_text()
+        assert "HUNYUAN_SIMPLIFY_TARGET" in script
+        patch = script[script.index("patching $IMG to honour HUNYUAN_SIMPLIFY_TARGET"):]
+        assert "simplify_mesh_utils.py" in patch
+        assert "docker commit" in patch, "the patch must persist into the image"
+
+    def test_the_patch_keeps_the_upstream_default(self):
+        """A missing variable must mean upstream behaviour, not zero faces."""
+        from pathlib import Path
+
+        script = Path("scripts/launch_from_image.sh").read_text()
+        # The quotes are \x27 escapes: the patch is python inside a docker
+        # command inside an ssh command, and a literal ' would end the shell
+        # string it is embedded in.
+        assert "HUNYUAN_SIMPLIFY_TARGET\\x27, 40000" in script
+
+    def test_it_is_idempotent(self):
+        """Self-heal runs on every launch; re-patching a patched image would
+        stack edits and eventually corrupt the file."""
+        from pathlib import Path
+
+        script = Path("scripts/launch_from_image.sh").read_text()
+        block = script[script.index("HUNYUAN_SIMPLIFY_TARGET already honoured") - 400:]
+        assert "grep -q" in block
+
+    def test_the_patch_logic_produces_working_code(self):
+        """Run the same two replacements the container patch does, against the
+        upstream source, and check the result compiles and reads the env."""
+        import os
+        import textwrap
+
+        upstream = textwrap.dedent('''
+            import trimesh
+            import pymeshlab
+
+            def mesh_simplify_trimesh(inputpath, outputpath, target_count=40000):
+                return target_count
+        ''')
+        s = upstream.replace("import trimesh", "import os\nimport trimesh", 1)
+        s = s.replace(
+            "def mesh_simplify_trimesh(inputpath, outputpath, target_count=40000):",
+            "def mesh_simplify_trimesh(inputpath, outputpath, target_count=None):\n"
+            "    if target_count is None:\n"
+            "        target_count = int(os.environ.get('HUNYUAN_SIMPLIFY_TARGET', 40000))",
+        )
+        ns: dict = {}
+        exec(compile(s.replace("import pymeshlab", ""), "<patched>", "exec"), ns)
+
+        os.environ["HUNYUAN_SIMPLIFY_TARGET"] = "300000"
+        try:
+            assert ns["mesh_simplify_trimesh"]("a", "b") == 300000
+        finally:
+            del os.environ["HUNYUAN_SIMPLIFY_TARGET"]
+        assert ns["mesh_simplify_trimesh"]("a", "b") == 40000
+        assert ns["mesh_simplify_trimesh"]("a", "b", 123) == 123

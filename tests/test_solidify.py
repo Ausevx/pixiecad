@@ -346,7 +346,42 @@ class TestTheWorkerGetsTheFaceBudget:
     def test_the_budget_becomes_the_decimation_target(self):
         from pixiecad.pipeline import _generative_defaults
 
-        assert _generative_defaults(None, spec=self._spec(300000))["decimation_target"] == 300000
+        out = _generative_defaults(None, spec=self._spec(300000), solidify_generated=False)
+        assert out["decimation_target"] == 300000
+
+    def test_solidify_gets_the_dense_mesh_instead(self):
+        """Solidify DILATES fragments until they touch, so it reads the dense
+        mesh even though it replaces it. Decimating first starves it -- same
+        object, same dilation, same grid:
+
+            1,872,364 faces in -> fill 0.018 -> 0.958, one component
+              298,336 faces in -> fill 0.025 -> 0.047, 77 components
+
+        The second is a hollow blob. Decimation belongs after the repair, which
+        is where our own decimate stage already is.
+        """
+        from pixiecad.pipeline import _generative_defaults
+
+        out = _generative_defaults(None, spec=self._spec(300000), solidify_generated=True)
+        assert "decimation_target" not in out
+
+    def test_an_explicit_target_is_honoured_even_with_solidify(self):
+        """Refusing to default is not the same as refusing to obey."""
+        from pixiecad.pipeline import _generative_defaults
+
+        out = _generative_defaults(
+            {"decimation_target": 900000}, spec=self._spec(300000), solidify_generated=True
+        )
+        assert out["decimation_target"] == 900000
+
+    def test_the_pipeline_tells_it_whether_solidify_runs(self):
+        """A default that reads the wrong flag is worse than none."""
+        import inspect
+
+        from pixiecad import pipeline
+
+        src = inspect.getsource(pipeline._run_generative)
+        assert "solidify_generated=solidify_generated" in src
 
     def test_an_explicit_option_wins(self):
         """Defaults must not overwrite something the caller actually asked for."""

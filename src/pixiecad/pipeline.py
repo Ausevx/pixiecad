@@ -83,14 +83,30 @@ def _ingested_images_dir(report: IngestReport) -> Path | None:
     return None
 
 
-def _generative_defaults(options: dict | None, *, spec: ObjectSpec) -> dict:
+def _generative_defaults(
+    options: dict | None, *, spec: ObjectSpec, solidify_generated: bool = False
+) -> dict:
     """Fill in worker knobs the job already knows the answer to.
 
     The TRELLIS worker takes a ``decimation_target`` and, when nobody sets one,
     picks its own default of **2,000,000 faces** -- it has no idea what the job
     asked for. So a build with a 300,000-face budget requested a 1.87M-face
-    mesh and got one, and every stage downstream was left cleaning up after a
-    number the user never chose.
+    mesh and got one.
+
+    But it must NOT be set when solidify is going to run, and that cost a whole
+    build to learn. Solidify repairs a shattered surface by dilating the
+    fragments until they touch and then filling the interior -- so it reads the
+    dense mesh even though it replaces it. Decimating first starves it:
+
+        1,872,364 faces in ->  fill 0.018 -> 0.958, one component
+          298,336 faces in ->  fill 0.025 -> 0.047, 77 components
+
+    Same object, same dilation, same grid. At a sixth of the density the gaps
+    between fragments are wider than the dilation can bridge, the interior
+    drains straight out, and the result is a hollow blob. Decimation belongs
+    *after* the repair, which is exactly where our own decimate stage already
+    sits -- so on the solidify path the worker is asked for everything it has
+    and the budget is enforced locally.
 
     Unknown keys are dropped by each backend's own passthrough filter, so
     setting a TRELLIS knob costs nothing on the Hunyuan path.
@@ -106,7 +122,7 @@ def _generative_defaults(options: dict | None, *, spec: ObjectSpec) -> dict:
     from .generative.trellis_remote import TRELLIS_MESH_PROFILES
 
     out = dict(options or {})
-    if spec.target_faces:
+    if spec.target_faces and not solidify_generated:
         out.setdefault("decimation_target", int(spec.target_faces))
     profile = os.environ.get("PIXIECAD_TRELLIS_MESH_PROFILE", "").strip().lower()
     if profile:
@@ -173,7 +189,9 @@ def _run_generative(
     t0 = time.monotonic()
     all_images = [Path(p.working_path) for p in report.photos if p.working_path]
     images = _select_conditioning_views(all_images)
-    gen_options = _generative_defaults(generative_options, spec=spec)
+    gen_options = _generative_defaults(
+        generative_options, spec=spec, solidify_generated=solidify_generated
+    )
     try:
         result = run_generate(
             GenerateRequest(images=images, options=gen_options),
