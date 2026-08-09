@@ -48,6 +48,39 @@ def _find_dense_ply(session_root: Path) -> Path | None:
     return next((p for p in candidates if p.exists()), None)
 
 
+def _find_reoptimise_source(session_root: Path) -> tuple[Path, bool] | None:
+    """The highest-detail mesh a job kept, and whether it came from a backend.
+
+    Re-optimising re-runs only the mesh tail -- clean, decimate, unwrap, bake,
+    export -- at a new face budget. That is the cheap half of a build and it
+    needs no GPU, so changing your mind about polygon count should cost
+    seconds rather than another generation.
+
+    It used to look for dense.ply alone, which only photogrammetry produces.
+    Every generative job therefore failed with "Dense mesh (dense.ply) not
+    found", which reads as a missing file when the truth was that the feature
+    had never been taught about the backends -- and generative is the path
+    almost every job actually takes.
+
+    The generative equivalent is the raw mesh the backend returned, kept in
+    the generate stage's output. It is the RIGHT source rather than merely an
+    available one: re-decimating an already-decimated export would bake a
+    normal map from geometry that had itself lost detail.
+
+    Returns (path, is_generative), preferring a true dense reconstruction
+    because it is the more accurate of the two when a job has both.
+    """
+    dense = _find_dense_ply(session_root)
+    if dense is not None:
+        return dense, False
+
+    stages = session_root / "work" / "ws" / "stages"
+    generated = sorted(stages.glob("s3-generate-*/out/mesh.glb")) if stages.is_dir() else []
+    if generated:
+        return generated[-1], True
+    return None
+
+
 def _call_build(**kwargs: Any) -> Any:
     import pixiecad.generative  # noqa: F401  (registers fake backend)
     from pixiecad.pipeline import run_build
@@ -299,9 +332,10 @@ def create_app(root: Path) -> FastAPI:
     def _run_mesh_stages_sync(
         job_id: str, ws_root: Path, target_faces: int, normal_res: int = 1024
     ) -> None:
-        dense_ply = _find_dense_ply(ws_root)
-        if dense_ply is None:
-            raise FileNotFoundError("dense.ply not found")
+        found = _find_reoptimise_source(ws_root)
+        if found is None:
+            raise FileNotFoundError("no dense.ply or generate-stage mesh for this job")
+        source_path, is_generative = found
 
         with lock:
             job = jobs.get(job_id)
@@ -310,7 +344,35 @@ def create_app(root: Path) -> FastAPI:
                 job["stage"] = "clean"
                 job["log"].append("Cleaning dense mesh...")
 
-        dense_mesh = trimesh.load(dense_ply)
+        dense_mesh = trimesh.load(source_path, force="mesh", process=False)
+
+        if is_generative:
+            # Same repair the build does, and for the same reason: a shattered
+            # backend surface has to be closed BEFORE decimation, because
+            # decimating confetti only rearranges the fragments. solidify
+            # self-gates on fill, so a Hunyuan mesh that arrives solid is left
+            # untouched and this costs nothing.
+            from ..meshops.solidify import solidify
+
+            with lock:
+                job = jobs.get(job_id)
+                if job:
+                    job["stage"] = "solidify"
+                    job["log"].append("Rebuilding the surface as a solid...")
+            try:
+                outcome = solidify(dense_mesh)
+                if outcome.applied:
+                    dense_mesh = outcome.mesh
+                with lock:
+                    job = jobs.get(job_id)
+                    if job:
+                        job["log"].append(outcome.reason)
+            except Exception as exc:  # never fatal: an unrepaired mesh is a mesh
+                with lock:
+                    job = jobs.get(job_id)
+                    if job:
+                        job["log"].append(f"solidify skipped: {exc}")
+
         cleaned_mesh, _ = clean_mesh(dense_mesh)
 
         with lock:
@@ -1308,10 +1370,14 @@ def create_app(root: Path) -> FastAPI:
                 raise HTTPException(status_code=404, detail="Job not found")
             job_dir = Path(job["dir"])
 
-        if not _find_dense_ply(job_dir):
+        if _find_reoptimise_source(job_dir) is None:
             raise HTTPException(
                 status_code=409,
-                detail="Dense mesh (dense.ply) not found for this job",
+                detail=(
+                    "No source mesh kept for this job: re-optimising needs "
+                    "either a photogrammetry dense.ply or the generate stage's "
+                    "mesh.glb, and neither is on disk"
+                ),
             )
 
         with lock:
