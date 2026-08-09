@@ -279,9 +279,7 @@ export function JobDetailRoute({ jobId }: { jobId: string }) {
               )}
 
               {job.faces != null && job.glb_url && (
-                <div id="reoptimise" className="scroll-mt-20">
-                  <Reoptimise jobId={jobId} faces={job.faces} />
-                </div>
+                <Reoptimise jobId={jobId} faces={job.faces} />
               )}
             </div>
 
