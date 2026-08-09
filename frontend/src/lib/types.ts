@@ -53,6 +53,10 @@ export interface JobDetail {
   glb_url: string | null;
   regime: string | null;
   faces: number | null;
+  /** The budget the job was BUILT with. Survives a dashboard restart even
+   *  when the achieved face count does not, so it is the fallback the
+   *  re-optimise control seeds itself from. */
+  target_faces?: number | null;
   parts: JobPart[];
   warnings: string[];
   session: string;

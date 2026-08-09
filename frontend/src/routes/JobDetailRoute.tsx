@@ -278,8 +278,17 @@ export function JobDetailRoute({ jobId }: { jobId: string }) {
                 </div>
               )}
 
-              {job.faces != null && job.glb_url && (
-                <Reoptimise jobId={jobId} faces={job.faces} />
+              {/* Gated on the MODEL, not on the face count. faces lived only
+                  in memory, so every dashboard restart dropped it and this
+                  control silently vanished for every past job -- with a
+                  finished model sitting right there. It is persisted now, but
+                  jobs built before that still have none, hence the fallback
+                  to the budget the job was built with. */}
+              {job.glb_url && (
+                <Reoptimise
+                  jobId={jobId}
+                  faces={job.faces ?? job.target_faces ?? 20000}
+                />
               )}
             </div>
 

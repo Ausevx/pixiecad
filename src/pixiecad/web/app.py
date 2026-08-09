@@ -48,6 +48,24 @@ def _find_dense_ply(session_root: Path) -> Path | None:
     return next((p for p in candidates if p.exists()), None)
 
 
+def _merge_session_meta(session_root: Path, **fields: Any) -> None:
+    """Update keys in a session.json without rewriting the rest of it.
+
+    Deliberately NOT Session.write_meta: that rebuilds the file from a
+    dataclass, so calling it with a freshly constructed Session would clobber
+    everything already recorded -- the settings block and the generation seed
+    among them. Best-effort by design; failing to record a face count must
+    never fail a build that already succeeded.
+    """
+    meta_file = Path(session_root) / "session.json"
+    try:
+        meta = json.loads(meta_file.read_text())
+        meta.update(fields)
+        meta_file.write_text(json.dumps(meta, indent=2, default=str) + "\n")
+    except Exception:
+        pass
+
+
 def _find_reoptimise_source(session_root: Path) -> tuple[Path, bool] | None:
     """The highest-detail mesh a job kept, and whether it came from a backend.
 
@@ -174,6 +192,9 @@ def _rehydrate_jobs(root: Path) -> dict[str, dict[str, Any]]:
             "job_id": job_id,
             "name": meta.get("name") or meta.get("label") or session_dir.name,
             "target_faces": meta.get("target_faces"),
+            # Restored so re-optimise survives a restart; absent for jobs
+            # built before it was persisted, which the UI falls back for.
+            "faces": meta.get("faces"),
             "status": "done" if done else "failed",
             "stage": "complete" if done else "failed",
             "log": [
@@ -193,7 +214,6 @@ def _rehydrate_jobs(root: Path) -> dict[str, dict[str, Any]]:
             "dir": str(session_dir),
             "created_at": meta.get("created_at", ""),
             "regime": None,
-            "faces": None,
             "parts": parts,
             "parts_dir": str(parts_dir) if parts_dir.is_dir() else None,
             "warnings": [],
@@ -637,6 +657,15 @@ def create_app(root: Path) -> FastAPI:
                     job["regime"] = regime_val
                     job["glb_path"] = glb_path
                     job["faces"] = faces
+            # Outside the lock: this touches the disk. The face count lived
+            # only in memory, so every dashboard restart lost it -- and the
+            # re-optimise control is gated on it, which meant re-optimising
+            # became impossible for every past job the moment the server was
+            # restarted, with a finished model sitting right there.
+            _merge_session_meta(ws_root, faces=faces)
+            with lock:
+                job = jobs.get(job_id)
+                if job:
                     job["parts"] = parts
                     job["parts_dir"] = str(parts_dir) if parts_dir else None
                     job["warnings"] = warnings
@@ -1317,6 +1346,10 @@ def create_app(root: Path) -> FastAPI:
                 "web_url": job.get("web_url"),
                 "regime": job.get("regime"),
                 "faces": job.get("faces"),
+                # The budget the job was built with. Survives a restart even
+                # when the achieved count does not, so re-optimise seeds its
+                # input from it rather than from a generic default.
+                "target_faces": job.get("target_faces"),
                 "parts": job.get("parts", []),
                 "warnings": job.get("warnings", []),
                 "stages": job.get("stages", []),
