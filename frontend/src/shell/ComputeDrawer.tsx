@@ -390,6 +390,24 @@ function DrawerBody() {
                 {vm.instance.spot ? " · spot" : ""}
               </dd>
             </div>
+            {/* Which image this worker booted from. It decides what the VM can
+                actually do -- a pre-COLMAP image cannot run photogrammetry no
+                matter what the job form offers -- and a VM once booted from
+                the WRONG image, whose missing docker binary only surfaced
+                mid-run. Worth a line. */}
+            <div className="flex justify-between gap-3">
+              <dt>worker image</dt>
+              <dd className="text-ink-dim">{vm.instance.image ?? "unknown"}</dd>
+            </div>
+            {vm.instance.seconds_remaining != null && (
+              <div className="flex justify-between gap-3">
+                <dt>self-deletes in</dt>
+                <dd className="text-ink-dim">
+                  {Math.floor(vm.instance.seconds_remaining / 3600)}h{" "}
+                  {Math.round((vm.instance.seconds_remaining % 3600) / 60)}m
+                </dd>
+              </div>
+            )}
           </dl>
         )}
 

@@ -102,6 +102,9 @@ export interface VmInstance {
   spot: boolean;
   uptime_hours: number | null;
   host: string;
+  /** Machine image the VM booted from, e.g. "pixiecad-worker-v4". Decides
+   *  what tooling it has: a pre-COLMAP image cannot do photogrammetry. */
+  image: string | null;
   /** --max-run-duration, in seconds. Null when the VM has no hard stop. */
   max_run_seconds: number | null;
   /** Seconds until Compute Engine DELETES the instance. */

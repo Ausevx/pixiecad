@@ -44,6 +44,14 @@ class InstanceInfo:
     estimated_cost_usd: float | None
     #: The guardrail, in seconds, from --max-run-duration. None when the VM
     #: has no hard stop.
+    #: The machine image this VM was created from, e.g. "pixiecad-worker-v4".
+    #: Which image a worker booted from decides what tooling it has -- a VM
+    #: from a pre-COLMAP image cannot run photogrammetry no matter what the
+    #: dashboard offers -- and until now nothing on screen said which one it
+    #: was. It also catches the case that cost a job once already: a VM
+    #: launched from the wrong image, whose missing docker binary only
+    #: surfaced mid-run.
+    source_machine_image: str | None = None
     max_run_seconds: int | None = None
     #: Seconds until Compute Engine DELETES this instance. Clamped at 0.
     #:
@@ -194,6 +202,11 @@ def list_instances(project: str | None = None) -> list[InstanceInfo]:
 
         status = item.get("status", "")
 
+        raw_smi = item.get("sourceMachineImage", "")
+        source_machine_image = (
+            raw_smi.rstrip("/").split("/")[-1] if isinstance(raw_smi, str) and raw_smi else None
+        )
+
         accelerator = None
         guest_accs = item.get("guestAccelerators")
         if isinstance(guest_accs, list) and guest_accs:
@@ -256,6 +269,7 @@ def list_instances(project: str | None = None) -> list[InstanceInfo]:
                 preemptible=preemptible,
                 uptime_hours=uptime_hours,
                 estimated_cost_usd=estimated_cost_usd,
+                source_machine_image=source_machine_image,
                 max_run_seconds=max_run_seconds,
                 seconds_remaining=seconds_remaining,
             )

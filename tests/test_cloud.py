@@ -253,3 +253,28 @@ class TestTheGuardrailDeadlineIsVisible:
         src = inspect.getsource(appmod.create_app)
         assert '"max_run_seconds": inst.max_run_seconds' in src
         assert '"seconds_remaining": inst.seconds_remaining' in src
+
+    def test_the_source_machine_image_is_reported(self, monkeypatch):
+        """Which image a worker booted from decides what it can do -- a
+        pre-COLMAP image cannot run photogrammetry however the job form is
+        configured -- and a VM once booted from the WRONG image, whose missing
+        docker binary only surfaced mid-run."""
+        item = self._item(seconds=3600)
+        item["sourceMachineImage"] = (
+            "projects/p/global/machineImages/pixiecad-worker-v5"
+        )
+        inst = self._instances(monkeypatch, item)[0]
+        assert inst.source_machine_image == "pixiecad-worker-v5"
+
+    def test_a_vm_with_no_source_image_says_so(self, monkeypatch):
+        """A VM built from a plain OS image has no machine image; the drawer
+        must show 'unknown' rather than a blank row."""
+        inst = self._instances(monkeypatch, self._item(seconds=3600))[0]
+        assert inst.source_machine_image is None
+
+    def test_the_api_exposes_the_image(self):
+        import inspect
+
+        from pixiecad.web import app as appmod
+
+        assert '"image": inst.source_machine_image' in inspect.getsource(appmod.create_app)

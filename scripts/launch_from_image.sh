@@ -182,6 +182,26 @@ check_dep() {
 check_dep pixiecad-hunyuan-paint:latest fast_simplification
 check_dep pixiecad-hunyuan:latest rtree
 
+# Photogrammetry, for the >=16-photo regime. The dense stage shells out to
+# this exact tag (geometry/dense.py: DOCKER_COLMAP_IMAGE), and sparse SfM runs
+# locally via pycolmap, so only the dense half needs to be on the host.
+# Missing it means an orbit capture dies at S2b after the user has already
+# shot 40 photos.
+if ! sudo docker image inspect colmap/colmap:latest >/dev/null 2>&1; then
+  echo "  pulling colmap/colmap:latest (photogrammetry dense stage) ..."
+  sudo docker pull colmap/colmap:latest >/dev/null 2>&1 \
+    && echo "  colmap pulled OK" || echo "  WARNING: colmap pull failed; S2b dense will not run"
+else
+  echo "  colmap/colmap:latest present"
+fi
+# ffmpeg turns a 30-second orbit video into the 20-40 frames the photogrammetry
+# regime needs, which is a far easier capture than 40 deliberate stills.
+command -v ffmpeg >/dev/null 2>&1 || {
+  echo "  installing ffmpeg ..."
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg >/dev/null 2>&1 \
+    && echo "  ffmpeg installed" || echo "  WARNING: ffmpeg install failed"
+}
+
 # Not a missing module but the same shape of problem: an image baked before a
 # fix, which cannot be un-baked. trimesh 5.0.0 changed
 # simplify_quadric_decimation'"'"'s first positional argument from a face count to
