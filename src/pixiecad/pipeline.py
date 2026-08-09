@@ -159,6 +159,7 @@ def _run_generative(
     object_hint: str | None = None,
     executor: Executor | None = None,
     generative_options: dict | None = None,
+    seed: int | None = None,
 ) -> BuildResult:
     """Regimes with too few photos to triangulate: invent the geometry instead.
 
@@ -194,10 +195,20 @@ def _run_generative(
     )
     try:
         result = run_generate(
-            GenerateRequest(images=images, options=gen_options),
+            GenerateRequest(images=images, options=gen_options, seed=seed),
             ws,
             backend=backend,
         )
+        used = list((getattr(result, "metadata", None) or {}).get("conditioning_views") or [])
+        if used and len(used) < len(all_images):
+            # Which photo it kept comes down to filename order, and a good
+            # tetrapod and a bad one differed by exactly that -- with nothing
+            # in the log to tell them apart. Name it.
+            warnings.append(
+                f"conditioned on {', '.join(used)}; "
+                f"{len(all_images) - len(used)} of {len(all_images)} photo(s) "
+                "were not used for geometry"
+            )
         mesh = trimesh.load(result.mesh_path, force="mesh", process=False)
         stages.append(
             StageOutcome(
@@ -390,6 +401,7 @@ def run_build(
     max_parts: int = 8,
     object_hint: str | None = None,
     generative_options: dict | None = None,
+    seed: int | None = None,
 ) -> BuildResult:
     """Run the end-to-end PixieCAD pipeline.
 
@@ -479,6 +491,7 @@ def run_build(
             object_hint=object_hint,
             executor=executor,
             generative_options=generative_options,
+            seed=seed,
         )
 
     # S2a Sparse

@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+import numpy as np
+
 import trimesh
 
 from ..workspace import Workspace, fingerprint_file
@@ -156,7 +158,14 @@ class FakeBackend:
         mesh_file = out_dir / "fake.glb"
 
         t0 = time.monotonic()
+        # Seed-sensitive, but the SAME size and topology every time. A fake
+        # backend that varied its face count would make seed determinism
+        # testable and break every other test that assumes a fixed fake mesh --
+        # a jitter proves the seed reached the backend without that cost.
         mesh = trimesh.creation.icosphere()
+        if req.seed is not None:
+            rng = np.random.default_rng(req.seed)
+            mesh.vertices = mesh.vertices + rng.normal(scale=1e-3, size=mesh.vertices.shape)
         mesh.export(str(mesh_file))
         duration = time.monotonic() - t0
 
@@ -205,6 +214,11 @@ def run_generate(
 
     out_dir = run.dir / "out"
     res = backend_obj.generate(req, out_dir)
+    # Record the seed that was actually used, next to the existing mode and
+    # conditioning_views. Without this a good result cannot be reproduced --
+    # the whole point of pinning one.
+    if req.seed is not None:
+        res.metadata["seed"] = int(req.seed)
 
     mesh_p = Path(res.mesh_path)
     if not mesh_p.exists():

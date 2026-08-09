@@ -372,6 +372,7 @@ def create_app(root: Path) -> FastAPI:
         finish: FinishOptions | None = None,
         generative_options: dict[str, Any] | None = None,
         multiview: bool = False,
+        seed: int | None = None,
     ) -> None:
         with lock:
             job = jobs.get(job_id)
@@ -434,6 +435,7 @@ def create_app(root: Path) -> FastAPI:
                 split=split,
                 object_hint=object_hint,
                 generative_options=generative_options,
+                seed=seed,
             )
 
             regime_val = (
@@ -722,7 +724,11 @@ def create_app(root: Path) -> FastAPI:
         bake_normals: bool = Form(True),
         normal_res: int = Form(1024),
         bake_location: str = Form("auto"),
+        seed: int | None = Form(None),
     ):
+        import random
+        seed_val = seed if seed is not None else random.randint(0, 2**31 - 1)
+
         # One session folder per upload: input/, work/ and output/ are never
         # shared between jobs, so two people uploading at once cannot read or
         # overwrite each other's photos and meshes.
@@ -837,6 +843,7 @@ def create_app(root: Path) -> FastAPI:
             "height": height,
             "octree_resolution": gen_options["octree_resolution"],
             "multiview": use_multiview,
+            "seed": seed_val,
             **dataclasses.asdict(finish),
         }
         session.write_meta(
@@ -884,7 +891,7 @@ def create_app(root: Path) -> FastAPI:
 
         return _register_and_dispatch(
             job_info, job_dir, target_faces, backend_val, split, hint_val,
-            finish, gen_options, use_multiview,
+            finish, gen_options, use_multiview, seed_val,
         )
 
     def _register_and_dispatch(
@@ -897,6 +904,7 @@ def create_app(root: Path) -> FastAPI:
         finish: FinishOptions,
         gen_options: dict[str, Any],
         use_multiview: bool,
+        seed: int,
     ) -> dict[str, Any]:
         """Publish a job and start it, honouring the GPU-provisioning gate.
 
@@ -943,7 +951,7 @@ def create_app(root: Path) -> FastAPI:
             provision_running = provisioning.get("status") == "running"
 
         worker_args = (job_id, job_dir, target_faces, backend_val, split, hint_val,
-                       finish, gen_options, use_multiview)
+                       finish, gen_options, use_multiview, seed)
 
         # A job that needs a GPU, submitted while one is still being built,
         # used to be accepted and then die on a missing docker image -- the
@@ -1036,6 +1044,7 @@ def create_app(root: Path) -> FastAPI:
         bake_normals: bool | None = Form(None),
         normal_res: int | None = Form(None),
         bake_location: str | None = Form(None),
+        seed: int | None = Form(None),
     ):
         """Start a fresh job from an existing one's photos and settings.
 
@@ -1087,6 +1096,13 @@ def create_app(root: Path) -> FastAPI:
             settings["backend"] = None if backend.strip() in ("", "auto") else backend.strip()
         if object_hint is not None:
             settings["object_hint"] = object_hint.strip() or None
+
+        if seed is not None:
+            settings["seed"] = seed
+        elif "seed" not in settings or settings["seed"] is None:
+            import random
+            settings["seed"] = random.randint(0, 2**31 - 1)
+        seed_val = settings["seed"]
 
         with lock:
             if job_id not in jobs:
@@ -1181,6 +1197,7 @@ def create_app(root: Path) -> FastAPI:
             finish,
             gen_options,
             bool(settings.get("multiview", False)),
+            seed_val,
         )
         return {**res, "rerun_of": job_id}
 

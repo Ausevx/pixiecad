@@ -242,6 +242,7 @@ def run(
         "--segmentation",
         help="Part segmentation method: auto (geometric, default) | semantic (SAM on GPU host)",
     ),
+    seed: int = typer.Option(None, "--seed", help="Seed for generation determinism"),
 ):
     """Headless end-to-end run: photos in, .glb (+ parts) out, in a fresh session folder.
 
@@ -278,6 +279,9 @@ def run(
         )
         segmentation = "auto"
 
+    import random
+    seed_val = seed if seed is not None else random.randint(0, 2**31 - 1)
+
     session = new_session(runs_root, label=label, source=photos)
     staged = session.stage_inputs(photos)
     typer.echo(f"session: {session.root}")
@@ -311,6 +315,7 @@ def run(
         bake=bake, normal_res=normal_res, generative_backend=backend,
         split=split, max_parts=max_parts, object_hint=object_hint,
         generative_options=gen_options,
+        seed=seed_val,
     )
 
     typer.echo(f"regime:  {result.regime.value}")
@@ -376,6 +381,7 @@ def run(
         host=host,
         glb=collected.get("model"),
         parts=[p["name"] for p in result.parts],
+        seed=seed_val,
     )
 
     if not result.glb_path:
