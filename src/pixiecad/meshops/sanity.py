@@ -32,14 +32,45 @@ class SanityReport:
     aspect: tuple[float, float, float]
     area_ratio: float
     n_components: int
+    n_holes: int = 0
+    n_non_manifold: int = 0
     warnings: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         state = "ok" if self.ok else "SUSPECT"
         return (
             f"[{state}] aspect={tuple(round(a, 2) for a in self.aspect)} "
-            f"area_ratio={self.area_ratio:.2f} components={self.n_components}"
+            f"area_ratio={self.area_ratio:.2f} components={self.n_components} "
+            f"holes={self.n_holes} non_manifold={self.n_non_manifold}"
         )
+
+
+def _positional_edge_topology(mesh: trimesh.Trimesh) -> tuple[int, int]:
+    """Count open boundary edges (holes) and non-manifold edges after positional welding.
+
+    trimesh's native ``is_watertight`` counts edges by vertex index. When xatlas
+    cuts a surface into UV charts, it duplicates vertices along chart boundaries
+    (e.g., 14,709 stored vertices for 10,002 distinct positions, creating 9,130
+    false "open edges" on a sealed export).
+
+    Welding vertices by position (digits=6) merges UV seams before edge counting,
+    distinguishing true leaks (boundary edges shared by 1 face) from non-manifold
+    pinches (edges shared by >2 faces).
+    """
+    if len(mesh.faces) == 0 or len(mesh.vertices) == 0:
+        return 0, 0
+
+    unique, inverse = trimesh.grouping.unique_rows(mesh.vertices, digits=6)
+    faces = inverse[np.asarray(mesh.faces)]
+
+    edges = np.sort(faces[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2), axis=1)
+    edges, counts = np.unique(edges, axis=0, return_counts=True)
+    keep = edges[:, 0] != edges[:, 1]
+    counts = counts[keep]
+
+    n_holes = int((counts == 1).sum())
+    n_non_manifold = int((counts > 2).sum())
+    return n_holes, n_non_manifold
 
 
 def check_mesh(
@@ -89,11 +120,32 @@ def check_mesh(
     except Exception:
         n_components = -1
 
+    n_holes, n_non_manifold = _positional_edge_topology(mesh)
+
+    if n_holes > 0:
+        warnings.append(
+            f"mesh has {n_holes} open boundary edges (holes); "
+            "it is not watertight and will leak in 3D printing"
+        )
+
+    # Non-manifold edges are RECORDED but deliberately not warned about, so
+    # they cannot flip `ok` -- the pipeline maps report.ok straight to a
+    # [FAILED] sanity stage.
+    #
+    # A pinch is an edge used by more than two faces. It does not leak, it
+    # slices and prints fine, and it is endemic to marching-cubes output:
+    # measured on real exports, a perfectly good Hunyuan model carries 1 and
+    # the raw worker mesh 126, with zero holes in both. Failing the stage over
+    # that would recreate the exact false alarm this change exists to remove,
+    # only louder. The count is in the summary for anyone who cares.
+
     return SanityReport(
         ok=not warnings,
         extents=tuple(float(v) for v in ext),
         aspect=aspect,
         area_ratio=area_ratio,
         n_components=n_components,
+        n_holes=n_holes,
+        n_non_manifold=n_non_manifold,
         warnings=warnings,
     )
