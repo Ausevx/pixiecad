@@ -102,6 +102,10 @@ export interface VmInstance {
   spot: boolean;
   uptime_hours: number | null;
   host: string;
+  /** --max-run-duration, in seconds. Null when the VM has no hard stop. */
+  max_run_seconds: number | null;
+  /** Seconds until Compute Engine DELETES the instance. */
+  seconds_remaining: number | null;
 }
 
 export interface VmStatus {

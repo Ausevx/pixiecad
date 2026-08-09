@@ -3,7 +3,6 @@ from __future__ import annotations
 import shlex
 import subprocess
 import time
-from pathlib import Path
 
 from .base import Capabilities, GPUInfo, Job, JobResult, parse_nvidia_smi
 

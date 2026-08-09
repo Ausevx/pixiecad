@@ -2,6 +2,7 @@ import { motion } from "motion/react";
 import { signatures, snap } from "@/lib/motion";
 import { useReducedMotion } from "@/lib/hooks";
 import { useVm, type VmPresence, type VmState } from "@/lib/vm";
+import { VmCountdown } from "./VmCountdown";
 
 /* ─────────────────────────────────────────────────────────────────────────
    The VM pill: compute as persistent presence.
@@ -76,7 +77,11 @@ export function VmPill({ onOpen }: { onOpen: () => void }) {
     presence === "preempted"
       ? `GPU VM ${vm.preemptedName} was preempted. Open compute`
       : presence === "ready"
-        ? `GPU ready${hours ? `, up ${hours}` : ""}. Open compute`
+        ? `GPU ready${hours ? `, up ${hours}` : ""}${
+            vm.instance?.seconds_remaining != null
+              ? `, self-deletes in ${Math.round(vm.instance.seconds_remaining / 60)} minutes`
+              : ""
+          }. Open compute`
         : `${p.label}. Open compute`;
 
   return (
@@ -87,13 +92,30 @@ export function VmPill({ onOpen }: { onOpen: () => void }) {
       whileHover={reduced ? undefined : { scale: 1.03 }}
       whileTap={reduced ? undefined : { scale: 0.97 }}
       transition={snap}
-      className={`group flex items-center gap-2 rounded-panel border px-2.5 py-1 font-mono text-[11px] tracking-wide tabular-nums transition-[filter] hover:brightness-125 ${p.className}`}
+      className={`group flex items-center gap-2 rounded-panel border-2 px-3 py-1.5 font-mono text-[12.5px] font-medium tracking-wide tabular-nums transition-[filter] hover:brightness-125 ${p.className}`}
     >
       <motion.span aria-hidden="true" animate={glyphAnimation} className="leading-none">
         {p.glyph}
       </motion.span>
       <span className="uppercase">{p.label}</span>
       {hours && presence === "ready" && <span className="text-ink-faint">· {hours}</span>}
+      {/* Guarded on the data, not just on presence: a VM with no
+          --max-run-duration has no deadline to show, and an older server does
+          not send one at all. Rendering the separator outside this check left
+          a dangling middot with nothing after it. */}
+      {presence === "ready" &&
+        vm.instance?.seconds_remaining != null &&
+        vm.instance?.max_run_seconds != null && (
+          <>
+            <span aria-hidden="true" className="text-ink-faint">
+              ·
+            </span>
+            <VmCountdown
+              secondsRemaining={vm.instance.seconds_remaining}
+              maxRunSeconds={vm.instance.max_run_seconds}
+            />
+          </>
+        )}
       <span
         aria-hidden="true"
         className="text-ink-faint transition-transform group-hover:translate-x-0.5"

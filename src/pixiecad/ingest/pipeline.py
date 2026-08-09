@@ -18,7 +18,6 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
-from ..spec import ObjectSpec
 from ..workspace import Workspace, fingerprint_file
 from .dedup import DEFAULT_THRESHOLD, dhash_pair, mark_duplicates
 from .quality import assess_quality

@@ -42,6 +42,17 @@ class InstanceInfo:
     preemptible: bool
     uptime_hours: float | None
     estimated_cost_usd: float | None
+    #: The guardrail, in seconds, from --max-run-duration. None when the VM
+    #: has no hard stop.
+    max_run_seconds: int | None = None
+    #: Seconds until Compute Engine DELETES this instance. Clamped at 0.
+    #:
+    #: Worth surfacing rather than leaving implicit: the guardrail has twice
+    #: taken a VM down mid-job here -- once between the bake and texturing,
+    #: which surfaced as two unexplained "timed out after 30s" errors, and
+    #: once during a bake that then had nowhere to run. The countdown is the
+    #: difference between planning a long run and losing one.
+    seconds_remaining: float | None = None
 
 
 @dataclass
@@ -213,6 +224,20 @@ def list_instances(project: str | None = None) -> list[InstanceInfo]:
             except Exception:
                 uptime_hours = None
 
+        # maxRunDuration is nested and its seconds field arrives as a string
+        # from gcloud's JSON, hence the defensive parse.
+        max_run_seconds = None
+        seconds_remaining = None
+        if isinstance(scheduling, dict):
+            mrd = scheduling.get("maxRunDuration")
+            if isinstance(mrd, dict):
+                try:
+                    max_run_seconds = int(mrd.get("seconds") or 0) or None
+                except (TypeError, ValueError):
+                    max_run_seconds = None
+        if max_run_seconds and uptime_hours is not None:
+            seconds_remaining = max(0.0, max_run_seconds - uptime_hours * 3600.0)
+
         estimated_cost_usd = None
         if accelerator is not None and uptime_hours is not None:
             estimated_cost_usd = estimate_cost(
@@ -231,6 +256,8 @@ def list_instances(project: str | None = None) -> list[InstanceInfo]:
                 preemptible=preemptible,
                 uptime_hours=uptime_hours,
                 estimated_cost_usd=estimated_cost_usd,
+                max_run_seconds=max_run_seconds,
+                seconds_remaining=seconds_remaining,
             )
         )
 

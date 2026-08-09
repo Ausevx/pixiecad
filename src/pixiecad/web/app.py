@@ -1514,6 +1514,8 @@ def create_app(root: Path) -> FastAPI:
                     "gpu": inst.accelerator,
                     "spot": inst.preemptible,
                     "uptime_hours": inst.uptime_hours,
+                    "max_run_seconds": inst.max_run_seconds,
+                    "seconds_remaining": inst.seconds_remaining,
                     "host": f"{inst.name}.{inst.zone}.{project}" if project else "",
                 })
             running = [v for v in vms if str(v["status"]).upper() == "RUNNING"]

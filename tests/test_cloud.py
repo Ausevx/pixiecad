@@ -177,3 +177,79 @@ def test_malformed_json_gcloud(monkeypatch):
     monkeypatch.setattr("pixiecad.cloud._run", fake_run)
 
     assert list_instances() == []
+
+
+class TestTheGuardrailDeadlineIsVisible:
+    """Every worker VM self-DELETES at --max-run-duration, and that deadline
+    was invisible in the dashboard.
+
+    It has bitten twice: once it took a VM down between the normal-map bake
+    and texturing, which surfaced only as two unexplained "timed out after
+    30s" errors, and once it deleted a machine holding 43 GB of freshly
+    downloaded weights minutes before they were baked into an image. Uptime
+    was shown throughout; remaining time was not. Uptime says what you have
+    spent, this says whether the run you are about to start will survive.
+    """
+
+    @staticmethod
+    def _instances(monkeypatch, item):
+        import json as _json
+
+        from pixiecad import cloud
+
+        class _Res:
+            returncode = 0
+            stdout = _json.dumps([item])
+            stderr = ""
+
+        monkeypatch.setattr(cloud.subprocess, "run", lambda *a, **k: _Res())
+        return cloud.list_instances()
+
+    def _item(self, seconds=None, age_hours=1.0):
+        # Relative to NOW, not a fixed date: a hardcoded timestamp drifts past
+        # any guardrail you pick and the test starts asserting the clamp
+        # instead of the countdown.
+        from datetime import datetime, timedelta, timezone
+
+        created = (
+            datetime.now(timezone.utc) - timedelta(hours=age_hours)
+        ).isoformat()
+        item = {
+            "name": "vm", "zone": "z/asia-southeast1-b", "machineType": "m/g2-standard-16",
+            "status": "RUNNING", "creationTimestamp": created,
+            "scheduling": {"provisioningModel": "SPOT"},
+        }
+        if seconds is not None:
+            # gcloud returns this nested, and its seconds field as a STRING.
+            item["scheduling"]["maxRunDuration"] = {"seconds": str(seconds)}
+        return item
+
+    def test_the_deadline_is_parsed_and_counted_down(self, monkeypatch):
+        inst = self._instances(monkeypatch, self._item(seconds=28800))[0]
+        assert inst.max_run_seconds == 28800
+        assert inst.seconds_remaining is not None
+        # Remaining plus elapsed must reconstruct the guardrail.
+        assert inst.seconds_remaining + inst.uptime_hours * 3600 == pytest.approx(28800, abs=2)
+
+    def test_a_vm_past_its_deadline_reports_zero_not_negative(self, monkeypatch):
+        """A UI dividing by max_run_seconds must not get a negative ring."""
+        inst = self._instances(monkeypatch, self._item(seconds=60, age_hours=2.0))[0]
+        assert inst.seconds_remaining == 0.0
+
+    def test_a_vm_with_no_guardrail_reports_nothing(self, monkeypatch):
+        """An on-demand VM without --max-run-duration has no deadline; the
+        pill must show no countdown rather than a wrong one."""
+        inst = self._instances(monkeypatch, self._item(seconds=None))[0]
+        assert inst.max_run_seconds is None
+        assert inst.seconds_remaining is None
+
+    def test_the_api_passes_both_fields_through(self):
+        """The pill reads these two keys; losing them silently removes the
+        countdown with everything else still working."""
+        import inspect
+
+        from pixiecad.web import app as appmod
+
+        src = inspect.getsource(appmod.create_app)
+        assert '"max_run_seconds": inst.max_run_seconds' in src
+        assert '"seconds_remaining": inst.seconds_remaining' in src

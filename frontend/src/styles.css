@@ -80,10 +80,10 @@
 
   --px-ink: #e8ecf4;
   --px-ink-dim: #97a1b4;
-  --px-ink-faint: #5b6577;
+  --px-ink-faint: #6c7789;
 
-  --px-rule: #1c2231;
-  --px-rule-bright: #2a3244;
+  --px-rule: #232b3d;
+  --px-rule-bright: #37415a;
 
   /* Read by the background canvas, which cannot use Tailwind utilities. */
   --field-line: var(--px-rule);
@@ -181,8 +181,11 @@
     background: var(--px-void);
     color: var(--px-ink);
     font-family: var(--font-sans);
-    font-size: 14px;
-    line-height: 1.55;
+    /* 15px, not 14. The dashboard is read at arm's length while a job runs,
+       often glanced at rather than studied, and a point of size costs nothing
+       in a layout that is column-based rather than fixed-width. */
+    font-size: 15px;
+    line-height: 1.6;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     /* The background field is a fixed canvas behind everything; the page must
