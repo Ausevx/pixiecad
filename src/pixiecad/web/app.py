@@ -442,7 +442,48 @@ def create_app(root: Path) -> FastAPI:
                 # than leave a stale path from an earlier build.
                 job["glb_path"] = str(glb_path)
                 job["glb_url"] = f"/api/jobs/{job_id}/model.glb"
-                job["log"].append("GLB model export complete.")
+                # The whole point of re-optimising is a different face count,
+                # so the job has to stop reporting the old one -- the sidebar,
+                # the re-optimise slider's own starting value and the response
+                # all read it.
+                job["faces"] = len(unwrap_res.mesh.faces)
+                _merge_session_meta(ws_root, faces=len(unwrap_res.mesh.faces))
+
+        # Everything derived from the OLD model.glb is now a lie. Re-optimise
+        # rewrites only model.glb, so the web export and any CAD conversion
+        # keep the previous geometry -- and the Artifacts panel prefers .stl
+        # for its primary download, which meant re-optimising to 2.6 MB still
+        # offered a 33 MB STL of the mesh you just replaced. Offering a stale
+        # file is worse than offering none; they are cheap to regenerate from
+        # the Artifacts panel, and now correct when you do.
+        stale: list[str] = []
+        for pattern in ("model_web.glb", "*.stl", "*.obj", "*.ply"):
+            for old in out_dir.glob(pattern):
+                if old.name == "model.glb":
+                    continue
+                try:
+                    old.unlink()
+                    stale.append(old.name)
+                except OSError:
+                    pass
+        with lock:
+            job = jobs.get(job_id)
+            if job:
+                if stale:
+                    job["log"].append(
+                        "Removed artifacts built from the previous geometry: "
+                        + ", ".join(sorted(stale))
+                        + ". Re-export them from Artifacts when you need them."
+                    )
+                if (out_dir / "parts").is_dir():
+                    job["log"].append(
+                        "NOTE: the exported parts still come from the previous "
+                        "geometry; re-run the build to re-split at this budget."
+                    )
+                job["log"].append(
+                    f"GLB model export complete: {len(unwrap_res.mesh.faces):,} faces, "
+                    f"{glb_path.stat().st_size / 1e6:.1f} MB."
+                )
 
     def _job_worker(
         job_id: str,
@@ -1443,12 +1484,24 @@ def create_app(root: Path) -> FastAPI:
             )
 
         with lock:
+            glb = job.get("glb_path")
             return {
                 "status": job["status"],
                 "stage": job["stage"],
                 "log": list(job["log"]),
                 "report": job["report"],
                 "glb_url": job["glb_url"],
+                # What it actually PRODUCED, not what was asked for. Without
+                # these the UI could only echo the requested budget back, so a
+                # re-optimise that silently did nothing looked identical to one
+                # that worked -- and decimation routinely lands short of the
+                # target when the source mesh has fewer faces to give.
+                "faces": job.get("faces"),
+                "bytes": (
+                    Path(glb).stat().st_size
+                    if glb and Path(glb).is_file()
+                    else None
+                ),
             }
 
     @app.get("/api/jobs/{job_id}/model.glb")

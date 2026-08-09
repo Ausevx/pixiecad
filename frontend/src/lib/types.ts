@@ -304,3 +304,15 @@ export interface RerunPlan {
    *  falls back to its own defaults and has to say so. */
   has_settings: boolean;
 }
+
+/** What a re-optimise actually produced, as opposed to what was requested.
+ *  Decimation lands short of the target whenever the source mesh has fewer
+ *  faces to give, so the UI reports these rather than echoing the input. */
+export interface OptimizeResult {
+  status: string;
+  stage: string;
+  log: string[];
+  glb_url: string | null;
+  faces: number | null;
+  bytes: number | null;
+}

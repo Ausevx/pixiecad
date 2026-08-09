@@ -10,6 +10,7 @@ import type {
   NewJobParams,
   ProvisionState,
   RerunPlan,
+  OptimizeResult,
   StageCosts,
   VmStatus,
 } from "./types";
@@ -97,7 +98,11 @@ export const convertJob = (
 export const optimizeJob = (
   id: string,
   body: { target_faces: number; normal_res?: number },
-) => request<Partial<JobDetail>>(`/api/jobs/${encodeURIComponent(id)}/optimize`, json(body));
+) =>
+  request<OptimizeResult>(
+    `/api/jobs/${encodeURIComponent(id)}/optimize`,
+    json(body),
+  );
 
 /** POST /api/jobs is multipart, not JSON — the photos ride along with the
  *  settings in one request, and the server applies view tags by renaming the

@@ -83,15 +83,40 @@ function DeleteJob({ jobId, running }: { jobId: string; running: boolean }) {
  *  old dashboard this control sat in the centre of the screen and 409'd for
  *  every generative job — which is nearly all of them — so it is now shown
  *  only when the server has told us it can succeed. */
-function Reoptimise({ jobId, faces }: { jobId: string; faces: number }) {
+function Reoptimise({
+  jobId,
+  faces,
+  onDone,
+}: {
+  jobId: string;
+  faces: number;
+  onDone: () => void;
+}) {
   const [target, setTarget] = useState(faces);
   const [busy, setBusy] = useState(false);
 
   const run = async () => {
     setBusy(true);
     try {
-      await optimizeJob(jobId, { target_faces: target });
-      toast("ok", "Re-optimised", `Rebuilt at ${formatCount(target)} triangles.`);
+      const res = await optimizeJob(jobId, { target_faces: target });
+      // Refetch, or nothing on screen changes: the artifacts list keeps the
+      // old file sizes, the sidebar keeps the old face count, and the only
+      // evidence anything happened is a toast. That is what made this look
+      // broken -- there was no way to tell a working re-optimise from one
+      // that silently did nothing.
+      onDone();
+      // Report what came BACK, not what was asked for. Decimation lands short
+      // of the target whenever the source mesh has fewer faces to give, and
+      // echoing the request would hide that.
+      const got = res.faces ?? null;
+      const size = res.bytes != null ? ` · ${formatBytes(res.bytes)}` : "";
+      toast(
+        "ok",
+        "Re-optimised",
+        got != null
+          ? `Now ${formatCount(got)} triangles${size}.`
+          : `Rebuilt at ${formatCount(target)} triangles${size}.`,
+      );
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
       toast("fail", "Re-optimise failed", detail);
@@ -159,7 +184,7 @@ function RerunJob({
 }
 
 export function JobDetailRoute({ jobId }: { jobId: string }) {
-  const { job, log, files, loading, notFound, error } = useJob(jobId);
+  const { job, log, files, loading, notFound, error, refresh } = useJob(jobId);
   const reduced = useReducedMotion();
 
   if (notFound) {
@@ -285,10 +310,16 @@ export function JobDetailRoute({ jobId }: { jobId: string }) {
                   jobs built before that still have none, hence the fallback
                   to the budget the job was built with. */}
               {job.glb_url && (
-                <Reoptimise
-                  jobId={jobId}
-                  faces={job.faces ?? job.target_faces ?? 20000}
-                />
+                <div id="reoptimise" className="scroll-mt-20">
+                  <Reoptimise
+                    jobId={jobId}
+                    faces={job.faces ?? job.target_faces ?? 20000}
+                    onDone={() => {
+                      refresh();
+                      refreshJobs();
+                    }}
+                  />
+                </div>
               )}
             </div>
 
