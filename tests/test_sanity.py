@@ -30,10 +30,19 @@ def test_cube_of_noise_is_flagged():
     assert any("cubic" in w for w in r.warnings)
 
 
-def test_round_objects_can_opt_out():
-    """A ball really is cubic in aspect; the check must be suppressible."""
+def test_round_objects_no_longer_need_to_opt_out():
+    """A ball really is cubic in aspect -- and it is also obviously a real
+    object, so it must pass without anyone having to say so.
+
+    This test used to assert the opposite: that a ball FAILED by default and
+    had to be rescued with expect_elongated=False. That contract was wrong in
+    practice, because nothing in the pipeline or the dashboard ever set the
+    flag, so the escape hatch existed and was unreachable. A stellated star at
+    aspect (0.97, 0.96, 1.0) was reported [SUSPECT] with fill 0.637 and a clean
+    surface. Near-cubic now needs corroboration from fill or area ratio.
+    """
     ball = trimesh.creation.icosphere()
-    assert not check_mesh(ball).ok
+    assert check_mesh(ball).ok
     assert check_mesh(ball, expect_elongated=False).ok
 
 
@@ -115,3 +124,59 @@ def test_check_mesh_does_not_mutate_input_or_volume():
     assert split_box.volume == vol_before
     assert np.array_equal(split_box.vertices, v_copy_before)
     assert abs(split_box.volume - box.volume) < 1e-5
+
+
+class TestNearCubicAloneIsNotAFailure:
+    """A compact object is not a collapsed generation.
+
+    The near-cubic test was a standalone reject and it failed a perfectly good
+    model: a stellated star came back at aspect (0.97, 0.96, 1.0) -- genuinely
+    isotropic, as radially symmetric objects are -- with fill 0.637, area ratio
+    0.634 and not one edge over 40 degrees. Every corroborating signal said
+    "solid body"; the shape heuristic overrode all of them and the stage
+    reported [FAILED].
+
+    Dice, boxes, balls and tetrapods all have cubic bounding boxes. What a
+    collapsed generation actually looks like is cubic AND enclosing nothing.
+    """
+
+    def test_a_solid_cube_shaped_object_passes(self):
+        from pixiecad.meshops.sanity import check_mesh
+
+        r = check_mesh(trimesh.creation.box(extents=(1.0, 0.98, 0.97)))
+        assert r.ok, r.warnings
+        assert not any("near-cubic" in w for w in r.warnings)
+
+    def test_a_sphere_passes(self):
+        """As isotropic as it gets, and unambiguously a real object."""
+        from pixiecad.meshops.sanity import check_mesh
+
+        assert check_mesh(trimesh.creation.icosphere(subdivisions=3)).ok
+
+    def test_cubic_AND_hollow_is_still_flagged(self):
+        """The case the check exists for: it fills its box and encloses
+        nothing."""
+        from pixiecad.meshops.sanity import check_mesh
+
+        rng = np.random.default_rng(0)
+        pts = rng.random((300, 3))
+        faces = rng.integers(0, 300, (600, 3))
+        noise = trimesh.Trimesh(vertices=pts, faces=faces, process=False)
+        r = check_mesh(noise)
+        assert not r.ok
+        assert any("near-cubic" in w for w in r.warnings), r.warnings
+
+    def test_the_fill_ratio_is_reported(self):
+        """It is the discriminator, so it belongs in the summary where a
+        person can see why the verdict went the way it did."""
+        from pixiecad.meshops.sanity import check_mesh
+
+        r = check_mesh(trimesh.creation.box())
+        assert r.fill_ratio > 0.9
+        assert "fill=" in r.summary()
+
+    def test_the_floor_sits_below_real_output(self):
+        """Hunyuan meshes measure 0.42-0.98 and must never trip this."""
+        from pixiecad.meshops.sanity import CUBE_FILL_FLOOR
+
+        assert CUBE_FILL_FLOOR < 0.42

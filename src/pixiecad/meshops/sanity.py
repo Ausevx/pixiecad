@@ -23,6 +23,10 @@ CUBE_TOLERANCE = 0.05
 # Surface area over bounding-box area. A solid object is well under 1; noise
 # that fills the volume with sheets goes far above it.
 MAX_AREA_RATIO = 2.0
+# A near-cubic mesh is only suspicious if it also encloses very little. Real
+# solids sit at 0.4-0.9 (Hunyuan output measures 0.42-0.98); a collapsed
+# generation is near zero. Set below the lowest legitimate output seen.
+CUBE_FILL_FLOOR = 0.25
 
 
 @dataclass
@@ -32,6 +36,9 @@ class SanityReport:
     aspect: tuple[float, float, float]
     area_ratio: float
     n_components: int
+    #: Volume as a fraction of the convex hull's. The discriminator between a
+    #: compact real object and a box of noise.
+    fill_ratio: float = 0.0
     n_holes: int = 0
     n_non_manifold: int = 0
     warnings: list[str] = field(default_factory=list)
@@ -40,7 +47,8 @@ class SanityReport:
         state = "ok" if self.ok else "SUSPECT"
         return (
             f"[{state}] aspect={tuple(round(a, 2) for a in self.aspect)} "
-            f"area_ratio={self.area_ratio:.2f} components={self.n_components} "
+            f"area_ratio={self.area_ratio:.2f} fill={self.fill_ratio:.2f} "
+            f"components={self.n_components} "
             f"holes={self.n_holes} non_manifold={self.n_non_manifold}"
         )
 
@@ -94,11 +102,33 @@ def check_mesh(
 
     warnings: list[str] = []
 
+    # Fill is the honest test for "did generation collapse into a box of
+    # noise": such a mesh encloses almost nothing of its own hull, while a real
+    # body sits at 0.4-0.9.
+    try:
+        hull_volume = float(mesh.convex_hull.volume)
+        fill = float(abs(mesh.volume) / hull_volume) if hull_volume > 0 else 0.0
+    except Exception:
+        fill = 0.0
+
+    # Near-cubic ALONE is not evidence of anything. It was a standalone reject,
+    # and it failed a perfectly good model: a stellated star came back at
+    # aspect (0.97, 0.96, 1.0) -- genuinely isotropic, as radially symmetric
+    # objects are -- with fill 0.637, area ratio 0.634 and not one edge over
+    # 40 degrees. Every corroborating signal said "solid body" and the shape
+    # heuristic overrode all of them. Dice, boxes, balls and tetrapods are all
+    # legitimately cubic in their bounding box.
+    #
+    # It stays as a check because a collapsed generation really does fill its
+    # box uniformly -- but only when something else agrees.
     if expect_elongated and all(abs(a - 1.0) <= CUBE_TOLERANCE for a in aspect):
-        warnings.append(
-            f"bounding box is near-cubic {tuple(round(a, 3) for a in aspect)}; "
-            "generative failures fill their box uniformly, real objects rarely do"
-        )
+        corroborated = fill < CUBE_FILL_FLOOR or area_ratio > MAX_AREA_RATIO
+        if corroborated:
+            warnings.append(
+                f"bounding box is near-cubic {tuple(round(a, 3) for a in aspect)} "
+                f"AND it encloses only {fill:.2f} of its hull; "
+                "that combination is what a collapsed generation looks like"
+            )
 
     if area_ratio > MAX_AREA_RATIO:
         warnings.append(
@@ -145,6 +175,7 @@ def check_mesh(
         aspect=aspect,
         area_ratio=area_ratio,
         n_components=n_components,
+        fill_ratio=fill,
         n_holes=n_holes,
         n_non_manifold=n_non_manifold,
         warnings=warnings,
