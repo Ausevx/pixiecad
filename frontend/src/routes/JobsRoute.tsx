@@ -95,10 +95,36 @@ function JobRow({ job }: { job: JobSummary }) {
       </motion.a>
 
       {isTerminal(job.status) && (
-        <RerunRow jobId={job.job_id} name={job.name} />
+        <>
+          {job.glb_url && <OptimiseRow jobId={job.job_id} name={job.name} />}
+          <RerunRow jobId={job.job_id} name={job.name} />
+        </>
       )}
       </div>
     </motion.li>
+  );
+}
+
+/** Jump straight to this job's re-optimise control.
+ *
+ *  Re-optimise lived only on the detail page, so from the list the only way
+ *  to make a 20 MB export smaller was to rerun the whole build -- minutes of
+ *  GPU generation to change a decimation target. It needs a face count, so it
+ *  cannot be a bare icon; this navigates to the control instead of trying to
+ *  cram a numeric input into a list row.
+ *
+ *  Shown only when a model exists: there is nothing to re-optimise otherwise.
+ */
+function OptimiseRow({ jobId, name }: { jobId: string; name: string }) {
+  return (
+    <a
+      href={`${href({ kind: "job", id: jobId })}#reoptimise`}
+      aria-label={`Re-optimise ${name} at a different triangle budget`}
+      title="Rebuild this mesh at a different triangle budget — local, no GPU"
+      className="mr-2 shrink-0 rounded-sharp border border-rule px-2 py-1 font-mono text-[11px] text-ink-faint transition-colors hover:border-accent-edge hover:text-accent"
+    >
+      ⤓
+    </a>
   );
 }
 
