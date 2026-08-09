@@ -262,6 +262,8 @@ export interface NewJobParams {
   normal_res: number;
   /** Where the bake runs. "auto" resolves to the host when one is configured. */
   bake_location: "auto" | "local" | "host";
+  /** Optional generation seed for reproducible mesh creation. Empty/omitted lets the server generate one. */
+  seed?: number;
 }
 
 /** GET /api/stage-costs — what a job as configured will actually cost.

@@ -38,6 +38,12 @@ def client(tmp_path: Path):
 
 def test_get_root(client):
     """/ redirects into the SPA; following it must land on the real app."""
+    from pixiecad.web import app as m
+    import pathlib
+    import pytest
+    dist = pathlib.Path(m.__file__).parent / "static" / "dist"
+    if not (dist / "index.html").is_file():
+        pytest.skip("SPA bundle not built")
     res = client.get("/")
     assert res.status_code == 200
     assert "pixiecad" in res.text.lower()
@@ -187,6 +193,39 @@ def test_optimize_with_dense_mesh(tmp_path: Path):
     assert len(glb_res.content) > 0
 
 
+def test_optimize_hides_raw_exception_text(tmp_path: Path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    img1 = _generate_test_jpeg(1)
+    res = client.post(
+        "/api/jobs",
+        files=[("files", ("photo1.jpg", img1, "image/jpeg"))],
+        data={"name": "fail_mesh"},
+    )
+    job_id = res.json()["job_id"]
+    job_dir = Path(client.get(f"/api/jobs/{job_id}").json()["dir"])
+
+    # Write an invalid ply file to cause trimesh.load to fail
+    (job_dir / "dense.ply").write_text("Not a valid ply file")
+
+    opt_res = client.post(
+        f"/api/jobs/{job_id}/optimize", json={"target_faces": 50, "normal_res": 128}
+    )
+    assert opt_res.status_code == 500
+    # Short, but it must point somewhere: the exception text goes to the job
+    # log (asserted below) and the detail says so. Pinned so a future
+    # "helpful" change cannot put a traceback back in front of the user.
+    detail = opt_res.json()["detail"]
+    assert "log" in detail.lower()
+    assert "Traceback" not in detail
+
+    # The actual error should be in the job log
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "failed"
+    assert any("Optimization failed:" in line for line in job["log"])
+
+
 def test_full_pipeline_fake_backend_and_parts(client):
     import time
 
@@ -304,17 +343,17 @@ class TestFinishingOptionsWiring:
         from pixiecad.web import app as app_module
 
         source = inspect.getsource(app_module.create_app)
-        for field in self._new_job_params():
-            if field == "view_tags":
+        for f_name in self._new_job_params():
+            if f_name == "view_tags":
                 continue  # sent as JSON under its own name, asserted below
-            assert f"{field}:" in source, f"{field} not accepted by /api/jobs"
+            assert f"{f_name}:" in source, f"{f_name} not accepted by /api/jobs"
         assert "view_tags" in source
 
     def test_finishing_controls_are_still_wired(self):
         """The finishing options specifically, since they are the ones that
         silently degrade to a local-only run when they go missing."""
         params = self._new_job_params()
-        for field in (
+        for f_name in (
             "smooth_iterations",
             "texture",
             "segmentation",
@@ -323,7 +362,7 @@ class TestFinishingOptionsWiring:
             "max_parts",
             "gpu_host",
         ):
-            assert field in params, f"{field} missing from the client's params"
+            assert f_name in params, f"{f_name} missing from the client's params"
 
     def test_client_sends_every_field_it_declares(self):
         """types.ts is a declaration; NewJobRoute is what actually builds the
@@ -335,8 +374,8 @@ class TestFinishingOptionsWiring:
         if not route.is_file():
             pytest.skip("frontend sources not present")
         body = route.read_text()
-        for field in self._new_job_params():
-            assert field in body, f"{field} declared but never sent by NewJobRoute"
+        for f_name in self._new_job_params():
+            assert f_name in body, f"{f_name} declared but never sent by NewJobRoute"
 
     def test_defaults_do_not_require_a_gpu(self):
         """An untouched form must run entirely locally."""
@@ -457,15 +496,11 @@ class TestJobFilesAndConvert:
         assert client.get("/api/jobs/nope/files").status_code == 404
 
     def test_convert_rejects_unsupported_format(self, client, tmp_path: Path):
-        from pixiecad.web import app as app_module
-
         # Register a minimal job record so we reach the format check.
         assert client.post("/api/jobs/nope/convert", json={"format": "step"}).status_code == 404
 
     def test_delete_refuses_a_running_job(self, client, tmp_path: Path):
         """Deleting mid-run would pull files out from under the worker."""
-        import pixiecad.web.app as m
-
         assert client.delete("/api/jobs/missing").status_code == 404
 
 
@@ -741,6 +776,52 @@ class TestRehydration:
 
         listing = TestClient(create_app(tmp_path)).get("/api/jobs").json()
         assert [j["job_id"] for j in listing] == ["ok1"]
+
+    def test_rehydrate_preserves_regime_warnings_and_stages(self, tmp_path):
+        session = self._session(tmp_path, "meta-test", job_id="ccc333", finished=True)
+        meta_file = session.root / "session.json"
+        meta = json.loads(meta_file.read_text())
+        meta["regime"] = "sparse_views"
+        meta["warnings"] = ["Geometry is generated"]
+        meta["stages"] = [{"name": "generate", "status": "done", "detail": "foo", "seconds": 1.5}]
+        meta_file.write_text(json.dumps(meta))
+
+        client = TestClient(create_app(tmp_path))
+        job = client.get("/api/jobs/ccc333").json()
+        assert job["regime"] == "sparse_views"
+        assert job["warnings"] == ["Geometry is generated"]
+        assert job["stages"] == [{"name": "generate", "status": "done", "detail": "foo", "seconds": 1.5}]
+
+    def test_rehydrate_handles_legacy_jobs_without_new_fields(self, tmp_path):
+        self._session(tmp_path, "legacy-test", job_id="ddd444", finished=True)
+        client = TestClient(create_app(tmp_path))
+        job = client.get("/api/jobs/ddd444").json()
+        assert job["regime"] is None
+        assert job["warnings"] == []
+        assert job["stages"] == []
+
+class TestMergeSessionMeta:
+    def test_merge_session_meta_preserves_settings_and_seed(self, tmp_path):
+        from pixiecad.web.app import _merge_session_meta
+
+        session_root = tmp_path / "session_abc"
+        session_root.mkdir()
+        meta_file = session_root / "session.json"
+
+        original = {
+            "job_id": "abc",
+            "settings": {"target_faces": 5000},
+            "seed": 42
+        }
+        meta_file.write_text(json.dumps(original))
+
+        _merge_session_meta(session_root, regime="sparse_views", warnings=["test"])
+
+        updated = json.loads(meta_file.read_text())
+        assert updated["settings"] == {"target_faces": 5000}
+        assert updated["seed"] == 42
+        assert updated["regime"] == "sparse_views"
+        assert updated["warnings"] == ["test"]
 
 
 class TestLogCursor:

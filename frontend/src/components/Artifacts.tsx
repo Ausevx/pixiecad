@@ -76,6 +76,7 @@ export function Artifacts({
   const [showOther, setShowOther] = useState(false);
   const [sizeMm, setSizeMm] = useState("");
   const [format, setFormat] = useState<CadFormat>("stl");
+  const [repair, setRepair] = useState(false);
 
   const list = files?.files ?? [];
   const primary = pickPrimary(list);
@@ -85,14 +86,18 @@ export function Artifacts({
   /** Convert, then download, as one action. The old flow made the user press
    *  Convert, wait, then find and click the produced link; the conversion is
    *  an implementation detail of "give me an STL". */
-  async function convertAndDownload(fmt: CadFormat, sizeInput: string) {
+  async function convertAndDownload(fmt: CadFormat, sizeInput: string, doRepair = repair) {
     setBusy(true);
     try {
       const mm = Number.parseFloat(sizeInput);
-      const res = await convertJob(job.job_id, {
+      const reqBody: { format: string; source?: string; size_mm?: number | null; repair?: boolean } = {
         format: fmt,
         size_mm: Number.isFinite(mm) ? mm : null,
-      });
+      };
+      if (doRepair) {
+        reqBody.repair = true;
+      }
+      const res = await convertJob(job.job_id, reqBody);
       // Triggering the download rather than only rendering a link is what
       // makes this one click instead of two.
       const a = document.createElement("a");
@@ -158,7 +163,7 @@ export function Artifacts({
             <motion.button
               type="button"
               disabled={busy}
-              onClick={() => void convertAndDownload("stl", sizeMm)}
+              onClick={() => void convertAndDownload("stl", sizeMm, repair)}
               whileHover={reduced || busy ? undefined : { scale: 1.02 }}
               whileTap={reduced || busy ? undefined : { scale: 0.98 }}
               transition={snap}
@@ -224,10 +229,24 @@ export function Artifacts({
                     />
                   </label>
 
+                  {/* Trimesh mesh repair qualifier: fills holes, fixes inverted normals,
+                      and closes non-manifold edges during format conversion. */}
+                  <label className="flex items-center gap-1.5 pb-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={repair}
+                      onChange={(e) => setRepair(e.target.checked)}
+                      className="size-3.5 accent-accent"
+                    />
+                    <span className="font-mono text-[11px] text-ink-dim">
+                      repair mesh
+                    </span>
+                  </label>
+
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => void convertAndDownload(format, sizeMm)}
+                    onClick={() => void convertAndDownload(format, sizeMm, repair)}
                     className="rounded-sharp border border-rule-bright px-3 py-1 font-mono text-[11px] uppercase tracking-widest text-ink-dim hover:border-accent-dim hover:text-accent disabled:opacity-50"
                   >
                     {busy ? "…" : "convert & download"}

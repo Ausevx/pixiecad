@@ -318,6 +318,7 @@ export function NewJobRoute() {
   const [normalRes, setNormalRes] = useState(1024);
   const [bakeLocation, setBakeLocation] =
     useState<"auto" | "local" | "host">("auto");
+  const [seed, setSeed] = useState("");
 
   // ── Rerun mode ─────────────────────────────────────────────────────────
   // ?from=<job id> turns this screen into a confirmation step: every control
@@ -368,6 +369,12 @@ export function NewJobRoute() {
         setNormalRes(num("normal_res", 1024));
         const loc = str("bake_location", "auto");
         setBakeLocation(loc === "local" || loc === "host" ? loc : "auto");
+        const seedVal = s["seed"];
+        if (seedVal !== undefined && seedVal !== null) {
+          setSeed(String(seedVal));
+        } else {
+          setSeed("");
+        }
         // Advanced settings are prefilled from a previous run, so they are not
         // defaults any more -- hiding them behind a collapsed disclosure would
         // defeat the confirmation this screen exists for.
@@ -386,6 +393,12 @@ export function NewJobRoute() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+
+    const trimmedSeed = seed.trim();
+    const parsedSeed =
+      trimmedSeed !== "" && !Number.isNaN(Number(trimmedSeed))
+        ? Number(trimmedSeed)
+        : undefined;
 
     // A rerun sends the form's current values as overrides against the
     // original job's stored settings, and reuses its photos server-side.
@@ -417,6 +430,7 @@ export function NewJobRoute() {
           normal_res: normalRes,
           bake_location: bakeLocation,
           gpu_host: vm.host,
+          seed: parsedSeed,
         });
         refreshJobs();
         go({ kind: "job", id: res.job_id });
@@ -462,6 +476,7 @@ export function NewJobRoute() {
       bake_normals: bakeNormals,
       normal_res: normalRes,
       bake_location: bakeLocation,
+      seed: parsedSeed,
     };
 
     try {
@@ -622,6 +637,23 @@ export function NewJobRoute() {
               <option value={384}>high — separates close parts better</option>
               <option value={512}>maximum — slowest, most VRAM</option>
             </select>
+          </Field>
+
+          {/* Generation seed for deterministic mesh creation. Generative pipeline
+              is stochastic: identical photos and options produced meshes of
+              1.71M and 1.54M faces with different proportions. Empty lets the
+              server pick a random seed and record it. */}
+          <Field
+            label="generation seed"
+            hint="Empty chooses a random seed. Enter a recorded seed to reproduce exact geometry from a previous run."
+          >
+            <input
+              type="number"
+              value={seed}
+              onChange={(e) => setSeed(e.target.value)}
+              placeholder="auto"
+              className={`${inputClass} tabular-nums`}
+            />
           </Field>
 
           <BackendPicker

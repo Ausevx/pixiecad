@@ -213,11 +213,11 @@ def _rehydrate_jobs(root: Path) -> dict[str, dict[str, Any]]:
             ),
             "dir": str(session_dir),
             "created_at": meta.get("created_at", ""),
-            "regime": None,
+            "regime": meta.get("regime"),
             "parts": parts,
             "parts_dir": str(parts_dir) if parts_dir.is_dir() else None,
-            "warnings": [],
-            "stages": [],
+            "warnings": meta.get("warnings") or [],
+            "stages": meta.get("stages") or [],
             "restored": True,
             # Absent for sessions predating settings persistence; a rerun of
             # those falls back to defaults rather than refusing.
@@ -662,7 +662,13 @@ def create_app(root: Path) -> FastAPI:
             # re-optimise control is gated on it, which meant re-optimising
             # became impossible for every past job the moment the server was
             # restarted, with a finished model sitting right there.
-            _merge_session_meta(ws_root, faces=faces)
+            _merge_session_meta(
+                ws_root,
+                faces=faces,
+                regime=regime_val,
+                warnings=warnings,
+                stages=stage_outcomes,
+            )
             with lock:
                 job = jobs.get(job_id)
                 if job:
@@ -1428,7 +1434,13 @@ def create_app(root: Path) -> FastAPI:
             with lock:
                 job["status"] = "failed"
                 job["log"].append(f"Optimization failed: {exc}")
-            raise HTTPException(status_code=500, detail=str(exc))
+            # A short message, not a raw traceback -- but it must still point
+            # somewhere. The exception text goes to the job log above; saying
+            # so is the difference between a dead end and a next step.
+            raise HTTPException(
+                status_code=500,
+                detail="Re-optimise failed. The reason is in this job's log.",
+            )
 
         with lock:
             return {
