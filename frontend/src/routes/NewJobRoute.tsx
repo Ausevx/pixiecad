@@ -388,6 +388,11 @@ export function NewJobRoute() {
 
   const taggedCount = photos.filter((p) => p.tag).length;
   const needsGpu = texture || segmentation === "semantic";
+  // "generation detail" sets octree_resolution, and only Hunyuan reads it --
+  // see BACKEND_OPTIONS in generative/__init__.py. Auto prefers Hunyuan, so
+  // the control stays live there but cannot promise it will be used.
+  const detailIgnored = backend === "trellis-remote";
+  const detailUncertain = backend === "auto";
   const reusingPhotos = Boolean(rerunOf && plan);
   const canSubmit = reusingPhotos ? Boolean(plan?.can_rerun) : photos.length > 0;
 
@@ -623,20 +628,37 @@ export function NewJobRoute() {
             />
           </Field>
 
+          {/* Only Hunyuan reads octree_resolution. TRELLIS filters it out of
+              its options and generates at its own default, so offering the
+              control there was a lie the user paid GPU minutes to discover --
+              five runs asked for maximum and every one of them ignored it. */}
           <Field
             label="generation detail"
-            hint="Raise this when parts of the object merge together. Independent of the polygon budget."
+            hint={
+              detailIgnored
+                ? "Hunyuan only. TRELLIS generates at its worker's own resolution."
+                : "Raise this when parts of the object merge together. Independent of the polygon budget."
+            }
           >
             <select
               value={octree}
+              disabled={detailIgnored}
               onChange={(e) => setOctree(Number(e.target.value))}
-              className={inputClass}
+              className={`${inputClass} disabled:opacity-40`}
             >
               <option value={192}>draft — fastest</option>
               <option value={256}>standard</option>
               <option value={384}>high — separates close parts better</option>
               <option value={512}>maximum — slowest, most VRAM</option>
             </select>
+            {(detailIgnored || detailUncertain) && (
+              <span className="font-mono text-[10px] leading-relaxed text-warn">
+                ⚠{" "}
+                {detailIgnored
+                  ? "This backend does not read it."
+                  : "Applies only if auto picks Hunyuan."}
+              </span>
+            )}
           </Field>
 
           {/* Generation seed for deterministic mesh creation. Generative pipeline

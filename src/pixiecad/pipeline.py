@@ -141,6 +141,63 @@ def _generative_defaults(
     return out
 
 
+#: What the dashboard calls each generative option, so a warning about one
+#: names the control the user actually touched rather than a worker field.
+GENERATIVE_OPTION_LABELS = {
+    "octree_resolution": "generation detail",
+    "steps": "sampling steps",
+    "guidance_scale": "guidance scale",
+    "mesh_profile": "mesh profile",
+    "geometry_resolution": "geometry resolution",
+    "texture_output_size": "texture size",
+    "decimation_target": "worker face budget",
+}
+
+
+def _warn_about_ignored_options(
+    used_backend: str,
+    requested_options: dict | None,
+    warnings: list[str],
+    *,
+    requested: str | None = None,
+) -> None:
+    """Say so when the backend that ran cannot read a setting the user chose.
+
+    Each backend filters ``options`` against its own allow-list, which stops a
+    typo from silently changing generation -- but it dropped deliberate
+    settings just as silently. "Generation detail" sets ``octree_resolution``,
+    which only Hunyuan reads, so every TRELLIS build from the dashboard ran at
+    the worker's default however that control was set. Five consecutive runs
+    asked for maximum detail, all five ignored it, and nothing said a word.
+
+    Only options the CALLER supplied are reported. The defaults filled in by
+    ``_generative_defaults`` are ours, not the user's, and warning that a
+    backend ignores a knob meant for the other one would be noise.
+    """
+    if not requested_options:
+        return
+    from .generative import unsupported_options
+
+    ignored = unsupported_options(used_backend, requested_options)
+    if not ignored:
+        return
+    named = ", ".join(
+        f"{GENERATIVE_OPTION_LABELS.get(k, k)} ({k}={requested_options[k]})"
+        for k in ignored
+    )
+    # Auto-selection makes this a surprise rather than a mistake: the user
+    # never chose this backend, so the advice differs.
+    how = (
+        f"{used_backend} was chosen automatically and"
+        if requested in (None, "", "auto")
+        else f"{used_backend}"
+    )
+    warnings.append(
+        f"{how} does not read {named}; it generated at its own default. "
+        "Pick a backend that supports the setting, or leave it alone."
+    )
+
+
 def _run_generative(
     *,
     report,
@@ -198,6 +255,9 @@ def _run_generative(
             GenerateRequest(images=images, options=gen_options, seed=seed),
             ws,
             backend=backend,
+        )
+        _warn_about_ignored_options(
+            result.backend, generative_options, warnings, requested=backend
         )
         used = list((getattr(result, "metadata", None) or {}).get("conditioning_views") or [])
         if used and len(used) < len(all_images):
