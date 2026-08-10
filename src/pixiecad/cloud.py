@@ -202,10 +202,30 @@ def list_instances(project: str | None = None) -> list[InstanceInfo]:
 
         status = item.get("status", "")
 
-        raw_smi = item.get("sourceMachineImage", "")
-        source_machine_image = (
-            raw_smi.rstrip("/").split("/")[-1] if isinstance(raw_smi, str) and raw_smi else None
-        )
+        # Prefer OUR OWN metadata over GCP's sourceMachineImage.
+        #
+        # GCP returns sourceMachineImage right after creation and then stops:
+        # an instance launched from pixiecad-worker-v5 reported it correctly
+        # for a while and had dropped the field entirely a couple of hours
+        # later, from both `instances list` and `instances describe`. A
+        # dashboard row that decays to "unknown" is worse than none, because
+        # which image a worker booted from decides what it can do -- a
+        # pre-COLMAP image cannot run photogrammetry. launch_from_image.sh
+        # stamps the name into instance metadata, which is stable.
+        source_machine_image = None
+        meta = item.get("metadata")
+        if isinstance(meta, dict):
+            for entry in meta.get("items") or []:
+                if isinstance(entry, dict) and entry.get("key") == "pixiecad-image":
+                    source_machine_image = str(entry.get("value") or "") or None
+                    break
+        if source_machine_image is None:
+            raw_smi = item.get("sourceMachineImage", "")
+            source_machine_image = (
+                raw_smi.rstrip("/").split("/")[-1]
+                if isinstance(raw_smi, str) and raw_smi
+                else None
+            )
 
         accelerator = None
         guest_accs = item.get("guestAccelerators")

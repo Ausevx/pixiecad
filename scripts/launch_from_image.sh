@@ -71,6 +71,7 @@ for z in "${CANDIDATE_ZONES[@]}"; do
       --zone="$z" \
       --source-machine-image="$IMAGE" \
       --metadata-from-file=startup-script="$STARTUP" \
+      --metadata=pixiecad-image="$IMAGE" \
       --max-run-duration="${MAX_RUN_SECONDS}s" \
       --instance-termination-action=DELETE \
       "${ONDEMAND_FLAGS[@]}" \

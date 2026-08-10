@@ -254,6 +254,32 @@ class TestTheGuardrailDeadlineIsVisible:
         assert '"max_run_seconds": inst.max_run_seconds' in src
         assert '"seconds_remaining": inst.seconds_remaining' in src
 
+    def test_our_own_metadata_beats_gcps_field(self, monkeypatch):
+        """GCP returns sourceMachineImage for a while after creation and then
+        stops. An instance launched from pixiecad-worker-v5 reported it
+        correctly, and had dropped it entirely from both `instances list` and
+        `instances describe` a couple of hours later. A row that decays to
+        "unknown" is worse than none, so launch_from_image.sh stamps the name
+        into instance metadata and that wins."""
+        item = self._item(seconds=3600)
+        item["metadata"] = {"items": [{"key": "pixiecad-image", "value": "pixiecad-worker-v5"}]}
+        item["sourceMachineImage"] = "projects/p/global/machineImages/stale-v1"
+        inst = self._instances(monkeypatch, item)[0]
+        assert inst.source_machine_image == "pixiecad-worker-v5"
+
+    def test_gcps_field_is_still_the_fallback(self, monkeypatch):
+        """A VM launched by hand carries no stamp of ours."""
+        item = self._item(seconds=3600)
+        item["sourceMachineImage"] = "projects/p/global/machineImages/pixiecad-worker-v5"
+        inst = self._instances(monkeypatch, item)[0]
+        assert inst.source_machine_image == "pixiecad-worker-v5"
+
+    def test_the_launch_script_stamps_the_image(self):
+        from pathlib import Path
+
+        script = Path("scripts/launch_from_image.sh").read_text()
+        assert '--metadata=pixiecad-image="$IMAGE"' in script
+
     def test_the_source_machine_image_is_reported(self, monkeypatch):
         """Which image a worker booted from decides what it can do -- a
         pre-COLMAP image cannot run photogrammetry however the job form is
