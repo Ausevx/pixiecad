@@ -76,6 +76,17 @@ function JobRow({ job }: { job: JobSummary }) {
           </span>
         )}
 
+        {/* Only worth the space once there is more than one. A count of 1 is
+            every job that has ever finished, and says nothing. */}
+        {(job.models ?? 0) > 1 && (
+          <span
+            title={`${job.models} models: the build plus ${(job.models ?? 1) - 1} re-optimised`}
+            className="hidden shrink-0 rounded-sharp border border-rule px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-ink-faint sm:block"
+          >
+            ⊞ {job.models}
+          </span>
+        )}
+
         <span className="hidden shrink-0 font-mono text-[11px] tabular-nums text-ink-faint sm:block">
           {when(job.created_at)}
         </span>

@@ -24,6 +24,28 @@ export interface JobSummary {
   /** Rebuilt from disk after a restart, so its log and timings are gone even
    *  though its artifacts are intact. Worth saying rather than pretending. */
   restored?: boolean;
+  /** How many models this job holds: the build's own, plus one per
+   *  re-optimise. The only thing that tells you which jobs you have already
+   *  re-optimised without opening each one. */
+  models?: number;
+}
+
+/** One model file a job holds. The build writes model.glb; each re-optimise
+ *  adds model-<faces>.glb beside it rather than overwriting anything. */
+export interface JobModel {
+  name: string;
+  /** Variants carry it in their filename; the build's own comes from the
+   *  session, and is null for jobs re-optimised before that was recorded. */
+  faces: number | null;
+  bytes: number;
+  url: string;
+  /** model.glb — what the build itself produced. */
+  original: boolean;
+  /** The newest, and what the viewer and the sidebar describe. */
+  current: boolean;
+  /** Stem a CAD conversion of this model lands under, so the panel can tell
+   *  whether one already exists without duplicating the server's naming. */
+  basename: string;
 }
 
 /** One pipeline stage as the pipeline itself recorded it (StageOutcome). */
@@ -72,6 +94,9 @@ export interface JobDetail {
   web_url?: string | null;
   created_at?: string;
   restored?: boolean;
+  /** Every model this job holds, oldest first. Read from disk server-side, so
+   *  it survives a dashboard restart. */
+  models?: JobModel[];
 }
 
 /** GET /api/jobs/{id}/files */
@@ -315,4 +340,10 @@ export interface OptimizeResult {
   glb_url: string | null;
   faces: number | null;
   bytes: number | null;
+  /** The file it landed in. The build's model is still there beside it, so
+   *  saying "re-optimised" without saying which file appeared leaves the user
+   *  hunting through the list. */
+  model?: string | null;
+  /** How many models the job holds now. */
+  models?: number;
 }

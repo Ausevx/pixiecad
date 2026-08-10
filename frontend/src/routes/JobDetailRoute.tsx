@@ -110,12 +110,16 @@ function Reoptimise({
       // echoing the request would hide that.
       const got = res.faces ?? null;
       const size = res.bytes != null ? ` · ${formatBytes(res.bytes)}` : "";
+      // Name the file. The build's model is still there beside it, so "now
+      // 60,000 triangles" without a filename leaves the user unsure which of
+      // the downloads in Artifacts is the one that just appeared.
+      const where = res.model ? ` Saved as ${res.model}.` : "";
       toast(
         "ok",
         "Re-optimised",
-        got != null
+        (got != null
           ? `Now ${formatCount(got)} triangles${size}.`
-          : `Rebuilt at ${formatCount(target)} triangles${size}.`,
+          : `Rebuilt at ${formatCount(target)} triangles${size}.`) + where,
       );
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
@@ -257,8 +261,11 @@ export function JobDetailRoute({ jobId }: { jobId: string }) {
 
       {job && (
         <div className="mt-6 space-y-6">
-          {/* ── 1. What did I get. Top of the page, no scrolling. */}
-          <Artifacts job={job} files={files} onChanged={() => undefined} />
+          {/* ── 1. What did I get. Top of the page, no scrolling.
+                 onChanged refetches: a conversion writes a new file into the
+                 output directory, and without this the panel kept listing the
+                 directory as it was before the file it just produced. */}
+          <Artifacts job={job} files={files} onChanged={refresh} />
 
           {job.warnings.length > 0 && (
             <ul className="list-none space-y-1 rounded-panel border border-warn-edge bg-warn-wash p-3">

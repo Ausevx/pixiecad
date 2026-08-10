@@ -186,7 +186,9 @@ def test_optimize_with_dense_mesh(tmp_path: Path):
     assert opt_res.status_code == 200
     opt_data = opt_res.json()
     assert opt_data["status"] == "done"
-    assert opt_data["glb_url"] == f"/api/jobs/{job_id}/model.glb"
+    # Versioned by mtime: a constant URL is served from the browser's cache,
+    # which is why re-optimising used to change nothing on screen.
+    assert opt_data["glb_url"].startswith(f"/api/jobs/{job_id}/model.glb?v=")
 
     glb_res = client.get(f"/api/jobs/{job_id}/model.glb")
     assert glb_res.status_code == 200
@@ -723,7 +725,7 @@ class TestRehydration:
 
         detail = client.get("/api/jobs/aaa111")
         assert detail.status_code == 200, "a deep link must survive a restart"
-        assert detail.json()["glb_url"] == "/api/jobs/aaa111/model.glb"
+        assert detail.json()["glb_url"].startswith("/api/jobs/aaa111/model.glb?v=")
 
     def test_restored_job_can_still_be_downloaded(self, tmp_path):
         """The point of restoring is reaching the artifacts, not the record."""

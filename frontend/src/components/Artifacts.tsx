@@ -1,10 +1,10 @@
 import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
-import { convertJob, formatBytes } from "@/lib/api";
+import { convertJob, formatBytes, formatCount } from "@/lib/api";
 import { useReducedMotion } from "@/lib/hooks";
 import { listItemVariants, listVariants, snap } from "@/lib/motion";
 import { toast } from "@/shell/toast";
-import type { JobDetail, JobFile, JobFiles } from "@/lib/types";
+import type { JobDetail, JobFile, JobFiles, JobModel } from "@/lib/types";
 
 /* ─────────────────────────────────────────────────────────────────────────
    The artifacts panel — the top of the job screen, not the bottom of it.
@@ -22,16 +22,76 @@ type CadFormat = (typeof CAD_FORMATS)[number];
 /** What the user came for, in order of preference. STL first: this is a tool
  *  for getting machinable geometry into a slicer or a CAD package, and that
  *  is what STL is for. GLB is the fallback because it is what the pipeline
- *  always produces. */
-function pickPrimary(files: JobFile[]): JobFile | null {
-  const byName = (n: string) => files.find((f) => f.name.toLowerCase() === n);
+ *  always produces.
+ *
+ *  Anchored on the CURRENT model rather than on whatever STL happens to be in
+ *  the directory: once a job has been re-optimised there are several models
+ *  and possibly several STLs, and offering the one belonging to superseded
+ *  geometry is exactly the confusion this panel has to avoid. */
+function pickPrimary(files: JobFile[], current: JobModel | null): JobFile | null {
+  const byName = (n: string) =>
+    files.find((f) => f.name.toLowerCase() === n.toLowerCase());
   return (
+    (current ? byName(`${current.basename}.stl`) : null) ??
+    (current ? byName(current.name) : null) ??
     byName("model.stl") ??
     files.find((f) => f.name.toLowerCase().endsWith(".stl")) ??
     byName("model.glb") ??
     files.find((f) => f.name.toLowerCase().endsWith(".glb")) ??
     files[0] ??
     null
+  );
+}
+
+/** One model, as a download.
+ *
+ *  Every re-optimise adds a row here instead of replacing the one above it:
+ *  the point of trying a smaller budget is being able to compare it with the
+ *  one you had, and to go back if it is worse. */
+function ModelRow({ model }: { model: JobModel }) {
+  const reduced = useReducedMotion();
+  return (
+    <motion.li variants={listItemVariants} layout>
+      <motion.a
+        href={model.url}
+        download
+        whileHover={reduced ? undefined : { x: 2 }}
+        transition={snap}
+        title={
+          model.original
+            ? "The model this job's build produced"
+            : "Produced by re-optimising, at this polygon budget"
+        }
+        className={`group flex items-center gap-2 rounded-sharp px-2 py-1.5 hover:bg-hover ${
+          model.current ? "bg-accent-wash" : ""
+        }`}
+      >
+        <span
+          aria-hidden="true"
+          className={`font-mono text-[11px] ${
+            model.current ? "text-accent" : "text-ink-faint group-hover:text-accent"
+          }`}
+        >
+          ⤓
+        </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink-dim group-hover:text-ink">
+          {model.faces != null ? `${formatCount(model.faces)} tris` : model.name}
+        </span>
+        {model.current && (
+          <span className="shrink-0 font-mono text-[9px] uppercase tracking-widest text-accent">
+            shown
+          </span>
+        )}
+        {model.original && (
+          <span className="shrink-0 font-mono text-[9px] uppercase tracking-widest text-ink-faint">
+            built
+          </span>
+        )}
+        <span className="shrink-0 font-mono text-[11px] tabular-nums text-ink-faint">
+          {formatBytes(model.bytes)}
+        </span>
+      </motion.a>
+    </motion.li>
   );
 }
 
@@ -79,9 +139,19 @@ export function Artifacts({
   const [repair, setRepair] = useState(false);
 
   const list = files?.files ?? [];
-  const primary = pickPrimary(list);
-  const hasStl = list.some((f) => f.name.toLowerCase().endsWith(".stl"));
-  const secondary = list.filter((f) => f.name !== primary?.name);
+  const models = job.models ?? [];
+  const current = models.find((m) => m.current) ?? null;
+  const primary = pickPrimary(list, current);
+  // Whether an STL of the CURRENT model exists. Asking "is there any STL"
+  // meant that after a re-optimise the button offered the previous model's
+  // STL as though it were this one's.
+  const hasStl = current
+    ? list.some((f) => f.name.toLowerCase() === `${current.basename}.stl`.toLowerCase())
+    : list.some((f) => f.name.toLowerCase().endsWith(".stl"));
+  const modelNames = new Set(models.map((m) => m.name));
+  const secondary = list.filter(
+    (f) => f.name !== primary?.name && !modelNames.has(f.name),
+  );
 
   /** Convert, then download, as one action. The old flow made the user press
    *  Convert, wait, then find and click the produced link; the conversion is
@@ -93,6 +163,10 @@ export function Artifacts({
       const reqBody: { format: string; source?: string; size_mm?: number | null; repair?: boolean } = {
         format: fmt,
         size_mm: Number.isFinite(mm) ? mm : null,
+        // Convert what is on screen. Left unset the server picks the current
+        // model too, but being explicit means the request cannot drift from
+        // what this panel is describing.
+        source: current?.name,
       };
       if (doRepair) {
         reqBody.repair = true;
@@ -173,7 +247,7 @@ export function Artifacts({
                 {busy ? "converting…" : "⤓ download stl"}
               </span>
               <span className="font-mono text-[11px] opacity-80">
-                converts from {primary?.name ?? "model.glb"} on the way
+                converts from {current?.name ?? primary?.name ?? "model.glb"} on the way
               </span>
             </motion.button>
           )}
@@ -257,8 +331,33 @@ export function Artifacts({
           </AnimatePresence>
         </div>
 
-        {/* ── Everything else, one click each. */}
-        <div>
+        {/* ── The models, then everything else, one click each. */}
+        <div className="space-y-3">
+          {models.length > 0 && (
+            <div>
+              <h3 className="mb-1 font-mono text-[10px] uppercase tracking-widest text-ink-faint">
+                {models.length > 1
+                  ? `Models · ${models.length}`
+                  : "Model"}
+              </h3>
+              <motion.ul
+                variants={listVariants}
+                initial="initial"
+                animate="animate"
+                className="max-h-40 list-none overflow-y-auto rounded-sharp border border-rule"
+              >
+                {models.map((m) => (
+                  <ModelRow key={m.name} model={m} />
+                ))}
+              </motion.ul>
+              {models.length > 1 && (
+                <p className="mt-1 font-mono text-[10px] leading-relaxed text-ink-faint">
+                  Re-optimising adds a model; it never replaces one.
+                </p>
+              )}
+            </div>
+          )}
+
           {secondary.length === 0 ? (
             <p className="font-mono text-[11px] text-ink-faint">No other files.</p>
           ) : (

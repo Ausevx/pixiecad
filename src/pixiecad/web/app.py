@@ -7,6 +7,7 @@ import dataclasses
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -174,8 +175,11 @@ def _rehydrate_jobs(root: Path) -> dict[str, dict[str, Any]]:
         # session from the list entirely.
         job_id = str(meta.get("job_id") or session_dir.name)
         out_dir = session_dir / "output"
-        glb = out_dir / "model.glb"
-        done = glb.is_file()
+        # The newest model, not model.glb: a job whose last act was a
+        # re-optimise must come back showing what it produced, and a job that
+        # only ever produced a variant still counts as finished.
+        glb = _current_model(out_dir)
+        done = glb is not None
 
         parts: list[dict[str, Any]] = []
         parts_dir = out_dir / "parts"
@@ -195,6 +199,10 @@ def _rehydrate_jobs(root: Path) -> dict[str, dict[str, Any]]:
             # Restored so re-optimise survives a restart; absent for jobs
             # built before it was persisted, which the UI falls back for.
             "faces": meta.get("faces"),
+            # What model.glb holds, once `faces` has moved on to a variant.
+            # Absent for jobs re-optimised before it was recorded -- the
+            # panel shows no count there rather than guessing one.
+            "build_faces": meta.get("build_faces"),
             "status": "done" if done else "failed",
             "stage": "complete" if done else "failed",
             "log": [
@@ -204,8 +212,8 @@ def _rehydrate_jobs(root: Path) -> dict[str, dict[str, Any]]:
                 "dashboard restart and did not finish.",
             ],
             "report": None,
-            "glb_path": str(glb) if done else None,
-            "glb_url": f"/api/jobs/{job_id}/model.glb" if done else None,
+            "glb_path": str(glb) if glb else None,
+            "glb_url": _model_url(job_id, glb),
             "web_url": (
                 f"/api/jobs/{job_id}/model_web.glb"
                 if (out_dir / "model_web.glb").is_file()
@@ -294,10 +302,118 @@ VIEW_TAG_CHOICES = ("front", "back", "left", "right")
 class ConvertRequest(BaseModel):
     """GLB -> STL/OBJ/PLY for CAD and slicers."""
 
-    source: str = "model.glb"
+    # Empty means the CURRENT model, which is what someone pressing "download
+    # STL" means -- naming model.glb explicitly still gets model.glb, so a
+    # caller that wants the build's own geometry can still ask for it.
+    source: str = ""
     format: str = "stl"
     size_mm: float | None = None
     repair: bool = False
+
+
+# ── Model variants ─────────────────────────────────────────────────────────
+#
+# A job keeps every model it has produced: output/model.glb from the build,
+# plus one model-<faces>.glb per re-optimise.
+#
+# Re-optimise used to rewrite model.glb in place, which destroyed the only
+# copy of the geometry the build shipped -- trying a smaller budget was a
+# one-way door. It also made a working re-optimise indistinguishable from one
+# that did nothing: the URL was a constant, so the browser served its cached
+# copy, React never remounted the viewer, and the picture on screen did not
+# move however far the slider did.
+MODEL_VARIANT = re.compile(r"^model-(\d+)\.glb$")
+
+
+def _variant_name(faces: int) -> str:
+    return f"model-{faces}.glb"
+
+
+def _model_files(out_dir: Path) -> list[Path]:
+    """Every model this job holds, oldest first.
+
+    Ordered by mtime because that is the only record of which one is current
+    that survives a dashboard restart -- the in-memory job registry does not,
+    and the filenames carry a face count rather than a sequence number.
+    """
+    if not out_dir.is_dir():
+        return []
+    found = [p for p in out_dir.glob("model-*.glb") if MODEL_VARIANT.match(p.name)]
+    original = out_dir / "model.glb"
+    if original.is_file():
+        found.append(original)
+    found.sort(key=lambda p: p.stat().st_mtime)
+    return found
+
+
+def _current_model(out_dir: Path) -> Path | None:
+    """The newest model: what the viewer shows and conversions start from."""
+    found = _model_files(out_dir)
+    return found[-1] if found else None
+
+
+def _model_url(job_id: str, path: Path | None) -> str | None:
+    """The current model's URL, versioned by its mtime.
+
+    The version is the whole point. Without it the URL never changes, so
+    re-optimising swapped the bytes behind a constant address and neither the
+    browser nor React had any reason to notice.
+    """
+    if path is None or not path.is_file():
+        return None
+    return f"/api/jobs/{job_id}/model.glb?v={int(path.stat().st_mtime)}"
+
+
+def _export_stem(job_name: str, model_name: str) -> str:
+    """What a CAD conversion of ``model_name`` is called.
+
+    Named after the job so the file that lands in Downloads says what it is,
+    but suffixed with the variant's face count -- otherwise converting a
+    re-optimised model silently overwrites the STL of the one it came from.
+    """
+    stem = Path(job_name or "model").stem
+    match = MODEL_VARIANT.match(model_name)
+    return f"{stem}-{match.group(1)}" if match else stem
+
+
+def _model_list(
+    job_id: str,
+    out_dir: Path,
+    *,
+    job_name: str = "",
+    build_faces: int | None = None,
+    current_faces: int | None = None,
+) -> list[dict[str, Any]]:
+    """The job's models as the UI needs them: what each is, and which is live."""
+    files = _model_files(out_dir)
+    if not files:
+        return []
+    current = files[-1].name
+    listed: list[dict[str, Any]] = []
+    for path in files:
+        match = MODEL_VARIANT.match(path.name)
+        if match:
+            faces: int | None = int(match.group(1))
+        elif build_faces is not None:
+            faces = build_faces
+        elif path.name == current:
+            # Nothing has superseded model.glb, so the job's face count is
+            # still describing it.
+            faces = current_faces
+        else:
+            # A job re-optimised before the build count was recorded. Saying
+            # nothing beats attributing the variant's count to it.
+            faces = None
+        listed.append({
+            "name": path.name,
+            "faces": faces,
+            "bytes": path.stat().st_size,
+            "url": f"/api/jobs/{job_id}/download/{path.name}",
+            "original": match is None,
+            "current": path.name == current,
+            "basename": _export_stem(job_name, path.name),
+        })
+    return listed
 
 
 def _safe_output_file(job_dir: Path, relative: str) -> Path:
@@ -429,7 +545,14 @@ def create_app(root: Path) -> FastAPI:
 
         out_dir = ws_root / "output"
         out_dir.mkdir(parents=True, exist_ok=True)
-        glb_path = out_dir / "model.glb"
+        faces = len(unwrap_res.mesh.faces)
+        # A NEW file rather than a rewrite of model.glb. The build's own model
+        # is the one thing a re-optimise cannot reproduce -- it would need the
+        # GPU again -- so overwriting it threw away the only copy every time
+        # someone tried a smaller budget. Re-optimising twice to the same
+        # budget lands on the same name, which is the right thing: that is the
+        # same model, not a third one.
+        glb_path = out_dir / _variant_name(faces)
         export_glb(unwrap_res.mesh, glb_path, normal_map=normal_map)
 
         with lock:
@@ -437,52 +560,43 @@ def create_app(root: Path) -> FastAPI:
             if job:
                 job["status"] = "done"
                 job["stage"] = "complete"
+                # The count model.glb has. Captured before `faces` below stops
+                # describing it and starts describing whichever variant is
+                # current, so the Artifacts panel can still label the original.
+                if job.get("build_faces") is None and job.get("faces") is not None:
+                    job["build_faces"] = job["faces"]
                 # Record where we actually wrote it: the download endpoint
                 # serves glb_path, and re-optimising must repoint it rather
                 # than leave a stale path from an earlier build.
                 job["glb_path"] = str(glb_path)
-                job["glb_url"] = f"/api/jobs/{job_id}/model.glb"
+                job["glb_url"] = _model_url(job_id, glb_path)
                 # The whole point of re-optimising is a different face count,
                 # so the job has to stop reporting the old one -- the sidebar,
                 # the re-optimise slider's own starting value and the response
                 # all read it.
-                job["faces"] = len(unwrap_res.mesh.faces)
-                _merge_session_meta(ws_root, faces=len(unwrap_res.mesh.faces))
+                job["faces"] = faces
+                meta_fields: dict[str, Any] = {"faces": faces}
+                if job.get("build_faces") is not None:
+                    meta_fields["build_faces"] = job["build_faces"]
+                _merge_session_meta(ws_root, **meta_fields)
 
-        # Everything derived from the OLD model.glb is now a lie. Re-optimise
-        # rewrites only model.glb, so the web export and any CAD conversion
-        # keep the previous geometry -- and the Artifacts panel prefers .stl
-        # for its primary download, which meant re-optimising to 2.6 MB still
-        # offered a 33 MB STL of the mesh you just replaced. Offering a stale
-        # file is worse than offering none; they are cheap to regenerate from
-        # the Artifacts panel, and now correct when you do.
-        stale: list[str] = []
-        for pattern in ("model_web.glb", "*.stl", "*.obj", "*.ply"):
-            for old in out_dir.glob(pattern):
-                if old.name == "model.glb":
-                    continue
-                try:
-                    old.unlink()
-                    stale.append(old.name)
-                except OSError:
-                    pass
         with lock:
             job = jobs.get(job_id)
             if job:
-                if stale:
+                kept = [p.name for p in _model_files(out_dir)]
+                if len(kept) > 1:
                     job["log"].append(
-                        "Removed artifacts built from the previous geometry: "
-                        + ", ".join(sorted(stale))
-                        + ". Re-export them from Artifacts when you need them."
+                        "Models kept for this job: " + ", ".join(kept) + "."
                     )
                 if (out_dir / "parts").is_dir():
                     job["log"].append(
-                        "NOTE: the exported parts still come from the previous "
+                        "NOTE: the exported parts still come from the build's "
                         "geometry; re-run the build to re-split at this budget."
                     )
                 job["log"].append(
-                    f"GLB model export complete: {len(unwrap_res.mesh.faces):,} faces, "
-                    f"{glb_path.stat().st_size / 1e6:.1f} MB."
+                    f"GLB model export complete: {faces:,} faces, "
+                    f"{glb_path.stat().st_size / 1e6:.1f} MB "
+                    f"({glb_path.name})."
                 )
 
     def _job_worker(
@@ -1342,18 +1456,28 @@ def create_app(root: Path) -> FastAPI:
     @app.get("/api/jobs")
     def list_jobs():
         with lock:
-            res = [
-                {
-                    "job_id": j["job_id"],
-                    "name": j["name"],
-                    "status": j["status"],
-                    "stage": j["stage"],
-                    "glb_url": j["glb_url"],
-                    "created_at": j.get("created_at", ""),
-                    "restored": bool(j.get("restored")),
-                }
+            snapshot = [
+                (
+                    {
+                        "job_id": j["job_id"],
+                        "name": j["name"],
+                        "status": j["status"],
+                        "stage": j["stage"],
+                        "glb_url": j["glb_url"],
+                        "created_at": j.get("created_at", ""),
+                        "restored": bool(j.get("restored")),
+                    },
+                    j["dir"],
+                )
                 for j in jobs.values()
             ]
+        # Counted outside the lock: it is one directory glob per job, and the
+        # list is polled. How many models a job holds is what tells you at a
+        # glance which ones you have re-optimised, without opening them.
+        res = []
+        for entry, job_dir in snapshot:
+            entry["models"] = len(_model_files(Path(job_dir) / "output"))
+            res.append(entry)
         # Newest first: the job you just started is the one you want to see,
         # and dict insertion order puts it last.
         res.sort(key=lambda j: j.get("created_at") or "", reverse=True)
@@ -1393,6 +1517,15 @@ def create_app(root: Path) -> FastAPI:
                 "web_url": job.get("web_url"),
                 "regime": job.get("regime"),
                 "faces": job.get("faces"),
+                # Every model this job holds: the build's own, plus one per
+                # re-optimise. Read from disk so it survives a restart.
+                "models": _model_list(
+                    job_id,
+                    Path(job["dir"]) / "output",
+                    job_name=job["name"],
+                    build_faces=job.get("build_faces"),
+                    current_faces=job.get("faces"),
+                ),
                 # The budget the job was built with. Survives a restart even
                 # when the achieved count does not, so re-optimise seeds its
                 # input from it rather than from a generic default.
@@ -1502,6 +1635,11 @@ def create_app(root: Path) -> FastAPI:
                     if glb and Path(glb).is_file()
                     else None
                 ),
+                # The file it landed in. The build's model is still there
+                # beside it, so saying "re-optimised" without saying which
+                # file appeared leaves the user hunting through the list.
+                "model": Path(glb).name if glb else None,
+                "models": len(_model_files(job_dir / "output")),
             }
 
     @app.get("/api/jobs/{job_id}/model.glb")
@@ -1627,12 +1765,25 @@ def create_app(root: Path) -> FastAPI:
                 detail=f"unsupported format '{fmt}'; use {', '.join(CAD_FORMATS)}",
             )
 
-        source = _safe_output_file(Path(job["dir"]), req.source)
-        if not source.is_file():
-            raise HTTPException(status_code=404, detail=f"no such model: {req.source}")
+        if req.source:
+            source = _safe_output_file(Path(job["dir"]), req.source)
+            if not source.is_file():
+                raise HTTPException(
+                    status_code=404, detail=f"no such model: {req.source}"
+                )
+        else:
+            # Convert what the user is looking at. Defaulting to model.glb
+            # meant that after a re-optimise the STL button quietly handed
+            # back the geometry that had just been superseded.
+            found = _current_model(Path(job["dir"]) / "output")
+            if found is None:
+                raise HTTPException(
+                    status_code=404, detail="no model to convert for this job"
+                )
+            source = found
 
         mesh = trimesh.load(source, force="mesh", process=False)
-        name = f"{Path(job['name'] or 'model').stem}.{fmt}"
+        name = f"{_export_stem(job['name'], source.name)}.{fmt}"
         try:
             path, report, actions = export_cad(
                 mesh,
