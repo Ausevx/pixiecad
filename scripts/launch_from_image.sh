@@ -148,10 +148,13 @@ du -sh "$HOME/.cache/huggingface" "$HOME/.cache/hy3dgen" 2>/dev/null || echo "  
 # cache is root-owned -- and a machine image bakes that ownership in. The
 # TRELLIS path then fails writing its HF token to ~/.cache/huggingface as the
 # SSH user, with "Permission denied" and no hint that ownership is the cause.
-# Cheap to correct at launch, so it is corrected at launch.
+#
+# The setup scripts now correct ownership at creation time, before the image is
+# baked, which is the real fix. This stays as a fallback: an image baked BEFORE
+# that change still carries root-owned caches and cannot be un-baked.
 echo "fixing cache ownership ..."
 gcloud compute ssh "$NAME" --project="$PROJECT" --zone="$ZONE" --quiet --command='
-for d in ~/.cache/huggingface ~/.cache/hy3dgen ~/.u2net; do
+for d in ~/.cache/huggingface ~/.cache/hy3dgen ~/.cache/sam ~/.u2net; do
   [ -e "$d" ] || continue
   sudo chown -R "$USER":"$USER" "$d" 2>/dev/null || true
 done

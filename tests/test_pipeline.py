@@ -4,7 +4,7 @@ import pytest
 import trimesh
 from pathlib import Path
 
-from pixiecad.pipeline import BuildResult, Regime, StageOutcome, detect_regime, run_build
+from pixiecad.pipeline import BuildResult, Regime, detect_regime, run_build
 from pixiecad.spec import Dimensions, ObjectSpec
 from pixiecad.workspace import Workspace
 from pixiecad.ingest.pipeline import IngestReport, PhotoRecord
@@ -452,3 +452,96 @@ def test_conditioning_views_fall_back_when_no_cardinals():
     got = _select_conditioning_views(shots)
     assert len(got) == 4
     assert got[0].name == "IMG_0.jpg"
+
+
+def test_no_duplicate_stage_names_on_zero_accepted_photos(tmp_path, monkeypatch):
+    """When ingest succeeds but yields 0 accepted photos, detect_regime fails.
+
+    The stage outcome list must record 'ingest' as ok and 'regime' as failed, with
+    no duplicate stage names in the list.
+    """
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    ws_dir = tmp_path / "ws"
+    ws = Workspace.create(ws_dir, ObjectSpec())
+
+    fake_report = IngestReport(
+        accepted=0,
+        duplicates=0,
+        rejected=4,
+        unreadable=0,
+        photos=[],
+        advice=[],
+    )
+
+    monkeypatch.setattr("pixiecad.pipeline.run_ingest", lambda p, w: fake_report)
+
+    result = run_build(photos_dir, ws, bake=False)
+
+    stage_names = [s.name for s in result.stages]
+    assert len(stage_names) == len(set(stage_names)), f"Duplicate stage names found: {stage_names}"
+
+    ingest_stage = next(s for s in result.stages if s.name == "ingest")
+    assert ingest_stage.status == "ok"
+    assert "0 accepted" in ingest_stage.detail
+
+    regime_stage = next(s for s in result.stages if s.name == "regime")
+    assert regime_stage.status == "failed"
+    assert "Invalid photo count: 0" in regime_stage.detail
+
+
+def test_no_duplicate_stage_names_on_happy_path(tmp_path, monkeypatch):
+    """Happy path build must not produce duplicate stage names."""
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    ws_dir = tmp_path / "ws"
+    spec = ObjectSpec(name="test_object", target_faces=80)
+    ws = Workspace.create(ws_dir, spec)
+
+    images_dir = tmp_path / "working_images"
+    images_dir.mkdir()
+    fake_img_path = images_dir / "photo0.jpg"
+    fake_img_path.write_text("fake_image_content")
+
+    fake_report = IngestReport(
+        accepted=20,
+        duplicates=0,
+        rejected=0,
+        unreadable=0,
+        photos=[PhotoRecord(source="photo0.jpg", status="accepted", working_path=str(fake_img_path))],
+        advice=[],
+    )
+
+    sparse_dir = tmp_path / "sparse_model"
+    sparse_dir.mkdir()
+    fake_sparse_res = SparseResult(
+        n_images_in=20,
+        n_registered=20,
+        n_points3d=500,
+        mean_reproj_error=0.4,
+        model_dir=str(sparse_dir),
+    )
+
+    mesh_dir = tmp_path / "dense_out"
+    mesh_dir.mkdir()
+    ply_path = mesh_dir / "mesh.ply"
+    ico = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+    ico.export(str(ply_path))
+
+    fake_dense_res = DenseResult(
+        mesh_path=str(ply_path),
+        n_faces=len(ico.faces),
+    )
+
+    monkeypatch.setattr("pixiecad.pipeline.run_ingest", lambda p, w: fake_report)
+    monkeypatch.setattr("pixiecad.pipeline.run_sparse", lambda img_dir, w: fake_sparse_res)
+    monkeypatch.setattr("pixiecad.pipeline.run_dense", lambda img_dir, s_dir, w, ex: fake_dense_res)
+
+    executor = LocalExecutor()
+    result = run_build(photos_dir, ws, bake=False, executor=executor)
+
+    stage_names = [s.name for s in result.stages]
+    assert len(stage_names) == len(set(stage_names)), f"Duplicate stage names found: {stage_names}"
+    assert "ingest" in stage_names
+    assert "regime" in stage_names
+

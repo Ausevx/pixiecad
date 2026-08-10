@@ -148,6 +148,10 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 sudo usermod -aG docker $USER
+# Pre-create base cache directories as $USER so docker volume mounts do not
+# auto-create them as root:root on the host host-side. Fixes root ownership
+# closer to the cause in the provisioning/setup layer.
+mkdir -p "$HOME/.cache" "$HOME/.u2net"
 # Quote carefully: with an empty PULL_IMAGE this used to reach the VM as
 # "[ -n ]", which POSIX evaluates as true (one argument, non-empty string
 # "-n"), so it ran "docker pull" with no image on every workload that builds

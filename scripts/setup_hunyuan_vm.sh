@@ -120,7 +120,12 @@ from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
 Hunyuan3DDiTFlowMatchingPipeline.from_pretrained('tencent/Hunyuan3D-2.1')
 print('shape weights cached')
 "
-sudo chown -R "$USER":"$USER" "$HOME/.cache/huggingface" "$HOME/.cache/hy3dgen" 2>/dev/null || true
+# Correct ownership of all host cache directories populated by root inside the container,
+# ensuring the baked machine image retains $USER ownership for SSH user access (e.g. TRELLIS token writes).
+for d in "$HOME/.cache" "$HOME/.u2net"; do
+  [ -e "$d" ] || continue
+  sudo chown -R "$USER":"$USER" "$d" 2>/dev/null || true
+done
 du -sh "$HOME/.cache/huggingface" "$HOME/.cache/hy3dgen" 2>/dev/null || true
 
 echo BUILD_OK

@@ -124,6 +124,12 @@ print('DifferentiableRenderer OK')
 from textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
 print('paint pipeline import OK')
 "
+# Correct ownership of host cache directories after container verification so
+# docker runs do not leave root-owned files on the disk before baking.
+for d in "\$HOME/.cache" "\$HOME/.u2net"; do
+  [ -e "\$d" ] || continue
+  sudo chown -R "\$USER":"\$USER" "\$d" 2>/dev/null || true
+done
 echo PAINT_BUILD_OK
 REMOTE
 )

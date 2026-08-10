@@ -446,12 +446,51 @@ def run_build(
                 seconds=dt,
             )
         )
-        regime = detect_regime(report.accepted)
     except Exception as e:
         dt = time.monotonic() - t0
         stages.append(
             StageOutcome(
                 name="ingest",
+                status="failed",
+                detail=str(e),
+                seconds=dt,
+            )
+        )
+        _fill_skipped_stages(stages, ["regime", "sparse", "dense", "scale", "clean", "decimate", "bake", "export"])
+        return BuildResult(
+            regime=Regime.SINGLE_IMAGE,
+            stages=stages,
+            glb_path=None,
+            faces=None,
+            scale_applied=None,
+            warnings=warnings,
+        )
+
+    # Regime selection
+    #
+    # Decides reconstruction regime based on the count of usable photos that
+    # survived ingest triage. Photo ingest itself is stage S0 ("ingest"); this
+    # decision stage ("regime") validates that at least 1 photo is available and
+    # determines whether to run photogrammetry (orbit), sparse views, or single-image
+    # generative backends. Keeping regime decision distinct from ingest prevents duplicate
+    # "ingest" stage outcomes when triage leaves 0 usable photos.
+    t0 = time.monotonic()
+    try:
+        regime = detect_regime(report.accepted)
+        dt = time.monotonic() - t0
+        stages.append(
+            StageOutcome(
+                name="regime",
+                status="ok",
+                detail=f"{regime.value} regime ({report.accepted} photo{'s' if report.accepted != 1 else ''})",
+                seconds=dt,
+            )
+        )
+    except Exception as e:
+        dt = time.monotonic() - t0
+        stages.append(
+            StageOutcome(
+                name="regime",
                 status="failed",
                 detail=str(e),
                 seconds=dt,

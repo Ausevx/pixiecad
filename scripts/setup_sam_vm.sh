@@ -63,6 +63,12 @@ sam = sam_model_registry['$MODEL_TYPE'](checkpoint=ckpt).to('cuda')
 SamAutomaticMaskGenerator(sam)
 print('SAM $MODEL_TYPE load OK')
 "
+# Correct ownership of host cache directories after container run so
+# docker mounts do not leave root-owned files on host before image baking.
+for d in "\$HOME/.cache" "\$HOME/.u2net"; do
+  [ -e "\$d" ] || continue
+  sudo chown -R \$USER:\$USER "\$d" 2>/dev/null || true
+done
 echo BUILD_OK
 REMOTE
 )
