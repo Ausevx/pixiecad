@@ -131,10 +131,171 @@
   --field-point: #a8a294;
 }
 
+/* ── Midnight: calm, low-temperature navy ───────────────────────────────
+   A cool blue-black palette built for low-light environments. The grounds shift
+   from neutral dark to deep navy, and the amber accent is replaced by a calm,
+   high-contrast cyan (#38bdf8) to reduce visual temperature. */
+
+:root[data-theme="midnight"] {
+  color-scheme: dark;
+
+  --px-void: #070a12;
+  --px-panel: #0e1320;
+  --px-raised: #151c2e;
+  --px-hover: #1d263c;
+
+  --px-accent: #38bdf8;
+  --px-accent-dim: #1d4ed8;
+  --px-accent-wash: #0a1d33;
+
+  --px-ok: #34d399;
+  --px-warn: #fbbf24;
+  --px-fail: #f87171;
+  --px-idle: #64748b;
+
+  --px-ok-wash: #081f19;
+  --px-ok-edge: #154c3c;
+  --px-warn-wash: #201a08;
+  --px-warn-edge: #4a3b12;
+  --px-fail-wash: #240c10;
+  --px-fail-edge: #661e2b;
+
+  --px-ink: #e2e8f0;
+  --px-ink-dim: #94a3b8;
+  --px-ink-faint: #64748b;
+
+  --px-rule: #1e293b;
+  --px-rule-bright: #334155;
+
+  --field-line: #1e293b;
+  --field-point: #64748b;
+}
+
+/* ── Nord: arctic ice and aurora ───────────────────────────────────────
+   The published Nord theme. Polar night grounds and frost accent (#88c0d0) provide
+   an arctic aesthetic. Standard Nord red (#bf616a) sits at ~3.0:1 on #2e3440, so it is
+   lightened to #e88790 to ensure status text clears WCAG AA 4.5:1. Ink-faint (#9099b0)
+   is similarly adjusted above nord3 (#4c566a) for legibility. */
+
+:root[data-theme="nord"] {
+  color-scheme: dark;
+
+  --px-void: #2e3440;
+  --px-panel: #3b4252;
+  --px-raised: #434c5e;
+  --px-hover: #4c566a;
+
+  --px-accent: #88c0d0;
+  --px-accent-dim: #5e81ac;
+  --px-accent-wash: #313c4d;
+
+  --px-ok: #a3be8c;
+  --px-warn: #ebcb8b;
+  --px-fail: #e88790;
+  --px-idle: #9099b0;
+
+  --px-ok-wash: #354143;
+  --px-ok-edge: #5a7e64;
+  --px-warn-wash: #413d3d;
+  --px-warn-edge: #8f7a52;
+  --px-fail-wash: #403338;
+  --px-fail-edge: #824a50;
+
+  --px-ink: #eceff4;
+  --px-ink-dim: #d8dee9;
+  --px-ink-faint: #9099b0;
+
+  --px-rule: #434c5e;
+  --px-rule-bright: #4c566a;
+
+  --field-line: #434c5e;
+  --field-point: #9099b0;
+}
+
+/* ── Sepia: aged parchment and warm ochre ───────────────────────────────
+   A warm, soft light theme reminiscent of aged paper drawings. To maintain AA
+   readability on parchment grounds, the ochre accent darkens to #85440e (6.3:1)
+   and primary ink uses a deep brown-black (#261c14) rather than pure black. */
+
+:root[data-theme="sepia"] {
+  color-scheme: light;
+
+  --px-void: #f4ecd8;
+  --px-panel: #faf4e6;
+  --px-raised: #ebe0c5;
+  --px-hover: #e2d3ab;
+
+  --px-accent: #85440e;
+  --px-accent-dim: #c48b48;
+  --px-accent-wash: #f9f0d9;
+
+  --px-ok: #1b6432;
+  --px-warn: #824d00;
+  --px-fail: #9e2417;
+  --px-idle: #6e6255;
+
+  --px-ok-wash: #e8f2e6;
+  --px-ok-edge: #9ec49a;
+  --px-warn-wash: #f9f0d9;
+  --px-warn-edge: #dbbe7d;
+  --px-fail-wash: #f8e9e6;
+  --px-fail-edge: #dca39a;
+
+  --px-ink: #261c14;
+  --px-ink-dim: #5c4c3e;
+  --px-ink-faint: #85735d;
+
+  --px-rule: #e2d5ba;
+  --px-rule-bright: #c6b595;
+
+  --field-line: #dccfb2;
+  --field-point: #a8987e;
+}
+
+/* ── Contrast: maximum accessibility void ───────────────────────────────
+   High-contrast dark palette designed for maximum legibility. Pure #000000 void,
+   #ffffff primary ink (21:1 contrast, clearing WCAG AAA 15:1), electric yellow accent
+   (#ffee00), and prominent borders favor extreme clarity over subtlety. */
+
+:root[data-theme="contrast"] {
+  color-scheme: dark;
+
+  --px-void: #000000;
+  --px-panel: #0d0d0d;
+  --px-raised: #1a1a1a;
+  --px-hover: #333333;
+
+  --px-accent: #ffee00;
+  --px-accent-dim: #998f00;
+  --px-accent-wash: #262400;
+
+  --px-ok: #00ff66;
+  --px-warn: #ffcc00;
+  --px-fail: #ff4d4d;
+  --px-idle: #b0b0b0;
+
+  --px-ok-wash: #00260f;
+  --px-ok-edge: #00cc52;
+  --px-warn-wash: #261e00;
+  --px-warn-edge: #cc9900;
+  --px-fail-wash: #2b0808;
+  --px-fail-edge: #ff3333;
+
+  --px-ink: #ffffff;
+  --px-ink-dim: #cccccc;
+  --px-ink-faint: #999999;
+
+  --px-rule: #555555;
+  --px-rule-bright: #888888;
+
+  --field-line: #666666;
+  --field-point: #cccccc;
+}
+
 /* System preference, honoured only when the user has not chosen explicitly.
-   An explicit [data-theme] always wins over the media query. */
+   An explicit [data-theme] attribute of any value wins over the media query. */
 @media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]):not([data-theme="light"]) {
+  :root:not([data-theme]) {
     color-scheme: light;
 
     --px-void: #f6f5f1;
