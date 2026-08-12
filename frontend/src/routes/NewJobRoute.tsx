@@ -290,6 +290,17 @@ function CapacityStrip({ needsGpu }: { needsGpu: boolean }) {
   );
 }
 
+/** The detail tiers, mapped onto the only three geometry resolutions the
+ *  TRELLIS worker accepts. draft is cheap, maximum is the ceiling, and the two
+ *  middle tiers share a value because there is no fourth level to give them.
+ *  The server clamps to this same set, so a hand-crafted request cannot escape
+ *  it either. */
+function geometryResolutionFor(tier: number): number {
+  if (tier <= 192) return 512;
+  if (tier >= 512) return 1536;
+  return 1024;
+}
+
 export function NewJobRoute() {
   const reduced = useReducedMotion();
   const vm = useVm();
@@ -305,6 +316,7 @@ export function NewJobRoute() {
   const [height, setHeight] = useState("");
   const [hint, setHint] = useState("");
   const [octree, setOctree] = useState(256);
+  const [fast, setFast] = useState(false);
   const [backend, setBackend] = useState("auto");
   const [split, setSplit] = useState(true);
   const [multiview, setMultiview] = useState(false);
@@ -356,6 +368,7 @@ export function NewJobRoute() {
         setHeight(str("height", ""));
         setHint(str("object_hint", ""));
         setOctree(num("octree_resolution", 256));
+        setFast(bool("fast", false));
         setBackend(str("backend", "auto") || "auto");
         setSplit(bool("split", true));
         setMultiview(bool("multiview", false));
@@ -388,11 +401,11 @@ export function NewJobRoute() {
 
   const taggedCount = photos.filter((p) => p.tag).length;
   const needsGpu = texture || segmentation === "semantic";
-  // "generation detail" sets octree_resolution, and only Hunyuan reads it --
-  // see BACKEND_OPTIONS in generative/__init__.py. Auto prefers Hunyuan, so
-  // the control stays live there but cannot promise it will be used.
-  const detailIgnored = backend === "trellis-remote";
-  const detailUncertain = backend === "auto";
+  // One control, two fields: Hunyuan reads octree_resolution and TRELLIS reads
+  // geometry_resolution, so both are sent and each backend takes the one it
+  // understands. TRELLIS accepts only three values, which is why two of the
+  // four tiers land on the same one — the server clamps to the same set.
+  const detailIsCoarse = backend === "trellis-remote" && (octree === 256 || octree === 384);
   const reusingPhotos = Boolean(rerunOf && plan);
   const canSubmit = reusingPhotos ? Boolean(plan?.can_rerun) : photos.length > 0;
 
@@ -430,6 +443,8 @@ export function NewJobRoute() {
           texture_size: textureSize,
           max_parts: maxParts,
           octree_resolution: octree,
+          geometry_resolution: geometryResolutionFor(octree),
+          fast,
           multiview,
           bake_normals: bakeNormals,
           normal_res: normalRes,
@@ -471,6 +486,8 @@ export function NewJobRoute() {
       texture_size: textureSize,
       max_parts: maxParts,
       octree_resolution: octree,
+      geometry_resolution: geometryResolutionFor(octree),
+      fast,
       multiview,
       backend,
       // The host the VM store already knows about, so the user never types an
@@ -628,21 +645,21 @@ export function NewJobRoute() {
             />
           </Field>
 
-          {/* Only Hunyuan reads octree_resolution. TRELLIS filters it out of
-              its options and generates at its own default, so offering the
-              control there was a lie the user paid GPU minutes to discover --
-              five runs asked for maximum and every one of them ignored it. */}
+          {/* This control used to be disabled for TRELLIS, on the belief that
+              the backend ignored it. It ignores octree_resolution, which is
+              what was being sent; it reads geometry_resolution. Both go now, and
+              each backend takes the one it understands. */}
           <Field
             label="generation detail"
             hint={
-              detailIgnored
-                ? "Hunyuan only. TRELLIS generates at its worker's own resolution."
+              fast
+                ? "Overridden by fast generation (draft quality)."
                 : "Raise this when parts of the object merge together. Independent of the polygon budget."
             }
           >
             <select
-              value={octree}
-              disabled={detailIgnored}
+              value={fast ? 192 : octree}
+              disabled={fast}
               onChange={(e) => setOctree(Number(e.target.value))}
               className={`${inputClass} disabled:opacity-40`}
             >
@@ -651,14 +668,23 @@ export function NewJobRoute() {
               <option value={384}>high — separates close parts better</option>
               <option value={512}>maximum — slowest, most VRAM</option>
             </select>
-            {(detailIgnored || detailUncertain) && (
+            {detailIsCoarse && !fast && (
               <span className="font-mono text-[10px] leading-relaxed text-warn">
-                ⚠{" "}
-                {detailIgnored
-                  ? "This backend does not read it."
-                  : "Applies only if auto picks Hunyuan."}
+                ⚠ TRELLIS has three levels, not four — standard and high both
+                generate at 1024.
               </span>
             )}
+          </Field>
+
+          <Field label="fast generation" hint="Trades quality for time. Overrides generation detail to draft (game_ready at 512).">
+            <div className="flex h-[38px] items-center">
+              <input
+                type="checkbox"
+                checked={fast}
+                onChange={(e) => setFast(e.target.checked)}
+                className="h-4 w-4 rounded-sm border-rule bg-transparent text-accent focus:ring-accent focus:ring-offset-0 focus:ring-offset-transparent"
+              />
+            </div>
           </Field>
 
           {/* Generation seed for deterministic mesh creation. Generative pipeline

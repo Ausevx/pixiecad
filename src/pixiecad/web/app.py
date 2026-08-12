@@ -1006,6 +1006,8 @@ def create_app(root: Path) -> FastAPI:
         max_parts: int = Form(8),
         gpu_host: str | None = Form(None),
         octree_resolution: int = Form(256),
+        geometry_resolution: int = Form(1024),
+        fast: bool = Form(False),
         view_tags: str | None = Form(None),
         multiview: bool = Form(False),
         bake_normals: bool = Form(True),
@@ -1110,7 +1112,19 @@ def create_app(root: Path) -> FastAPI:
         # the model resolve a gap the decoder would otherwise bridge -- and it
         # is independent of the polygon budget, which only controls how the
         # result is simplified afterwards.
-        gen_options = {"octree_resolution": max(64, octree_resolution)}
+        # TRELLIS uses geometry_resolution, Hunyuan uses octree_resolution.
+        allowed_res = [512, 1024, 1536]
+        clamped_geometry = min(allowed_res, key=lambda x: abs(x - geometry_resolution))
+        gen_options = {
+            "octree_resolution": max(64, octree_resolution),
+            "geometry_resolution": clamped_geometry,
+        }
+        if fast:
+            gen_options.update({
+                "mesh_profile": "game_ready",
+                "geometry_resolution": 512,
+                "texture_generation_mode": "fast_512",
+            })
         # Needs at least two tagged cardinal views to mean anything; below
         # that the backend falls back to single-view regardless.
         use_multiview = multiview and len(used_tags) >= 2
@@ -1128,6 +1142,8 @@ def create_app(root: Path) -> FastAPI:
             "width": width,
             "height": height,
             "octree_resolution": gen_options["octree_resolution"],
+            "geometry_resolution": gen_options["geometry_resolution"],
+            "fast": fast,
             "multiview": use_multiview,
             "seed": seed_val,
             **dataclasses.asdict(finish),
@@ -1325,6 +1341,8 @@ def create_app(root: Path) -> FastAPI:
         texture_size: int | None = Form(None),
         max_parts: int | None = Form(None),
         octree_resolution: int | None = Form(None),
+        geometry_resolution: int | None = Form(None),
+        fast: bool | None = Form(None),
         multiview: bool | None = Form(None),
         bake_normals: bool | None = Form(None),
         normal_res: int | None = Form(None),
@@ -1370,6 +1388,7 @@ def create_app(root: Path) -> FastAPI:
             "texture": texture, "segmentation": segmentation,
             "web_export": web_export, "texture_size": texture_size,
             "max_parts": max_parts, "octree_resolution": octree_resolution,
+            "geometry_resolution": geometry_resolution, "fast": fast,
             "multiview": multiview, "bake_normals": bake_normals,
             "normal_res": normal_res, "bake_location": bake_location,
         }
@@ -1434,10 +1453,19 @@ def create_app(root: Path) -> FastAPI:
             normal_res=max(256, min(2048, int(settings.get("normal_res", 1024)))),
             bake_location=str(settings.get("bake_location", "auto")),
         )
+        allowed_res = [512, 1024, 1536]
+        clamped_geometry = min(allowed_res, key=lambda x: abs(x - int(settings.get("geometry_resolution", 1024))))
         gen_options = {
-            "octree_resolution": max(64, int(settings.get("octree_resolution", 256)))
+            "octree_resolution": max(64, int(settings.get("octree_resolution", 256))),
+            "geometry_resolution": clamped_geometry,
         }
-        new_settings = {**settings, "gpu_host": host, "rerun_of": job_id}
+        if settings.get("fast"):
+            gen_options.update({
+                "mesh_profile": "game_ready",
+                "geometry_resolution": 512,
+                "texture_generation_mode": "fast_512",
+            })
+        new_settings = {**settings, "gpu_host": host, "rerun_of": job_id, "geometry_resolution": gen_options["geometry_resolution"]}
         session.write_meta(
             job_id=new_id, name=name, target_faces=target_faces, settings=new_settings
         )

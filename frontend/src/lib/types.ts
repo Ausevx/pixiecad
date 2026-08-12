@@ -278,6 +278,8 @@ export interface NewJobParams {
   max_parts: number;
   gpu_host?: string;
   octree_resolution: number;
+  geometry_resolution: number;
+  fast: boolean;
   multiview: boolean;
   /** filename → tag. Applied by renaming on upload, server-side. */
   view_tags: Record<string, ViewTag>;

@@ -179,7 +179,18 @@ def _warn_about_ignored_options(
         return
     from .generative import unsupported_options
 
-    ignored = unsupported_options(used_backend, requested_options)
+    ignored = set(unsupported_options(used_backend, requested_options))
+
+    # "Generation detail" is one control that has to be sent as two fields,
+    # because the dashboard does not know which backend will run: Hunyuan reads
+    # octree_resolution and TRELLIS reads geometry_resolution. Whichever one the
+    # backend ignores is our plumbing, not a setting the user chose, so warning
+    # about it would fire on every single job and train people to ignore the
+    # warning that matters. Only complain if neither field reached the backend.
+    detail_pair = {"octree_resolution", "geometry_resolution"}
+    if detail_pair & set(requested_options) - ignored:
+        ignored -= detail_pair
+
     if not ignored:
         return
     named = ", ".join(

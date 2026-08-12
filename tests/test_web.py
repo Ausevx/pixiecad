@@ -1754,3 +1754,68 @@ class TestJobCancellation:
         assert res.status_code == 200
         assert event.is_set()
         assert any("Cancellation requested" in line for line in app.state.jobs[jid]["log"])
+
+def test_post_jobs_geometry_resolution(client):
+    img1 = _generate_test_jpeg(1)
+
+    # 1. Posting each tier sends the expected geometry_resolution
+    for octree, geom in [(192, 512), (256, 1024), (384, 1024), (512, 1536)]:
+        res = client.post(
+            "/api/jobs",
+            files=[("files", ("photo1.jpg", img1, "image/jpeg"))],
+            data={"name": "test_obj", "octree_resolution": octree, "geometry_resolution": geom}
+        )
+        assert res.status_code == 200
+        job_id = res.json()["job_id"]
+        job_info = client.get(f"/api/jobs/{job_id}/rerun-plan").json()
+        assert job_info["settings"]["geometry_resolution"] == geom
+
+    # 2. Out-of-range clamped
+    res = client.post(
+        "/api/jobs",
+        files=[("files", ("photo1.jpg", img1, "image/jpeg"))],
+        data={"name": "test_obj", "octree_resolution": 256, "geometry_resolution": 9999}
+    )
+    assert res.status_code == 200
+    job_id = res.json()["job_id"]
+    job_info = client.get(f"/api/jobs/{job_id}/rerun-plan").json()
+    assert job_info["settings"]["geometry_resolution"] == 1536
+
+    # 3. fast=true takes precedence
+    res = client.post(
+        "/api/jobs",
+        files=[("files", ("photo1.jpg", img1, "image/jpeg"))],
+        data={"name": "test_obj", "octree_resolution": 512, "geometry_resolution": 1536, "fast": "true"}
+    )
+    assert res.status_code == 200
+    job_id = res.json()["job_id"]
+    job_info = client.get(f"/api/jobs/{job_id}/rerun-plan").json()
+    assert job_info["settings"]["geometry_resolution"] == 512
+    assert job_info["settings"]["fast"] is True
+
+    # 4. Omitting new fields reproduces today's behavior
+    res = client.post(
+        "/api/jobs",
+        files=[("files", ("photo1.jpg", img1, "image/jpeg"))],
+        data={"name": "test_obj", "octree_resolution": 256}
+    )
+    assert res.status_code == 200
+    job_id = res.json()["job_id"]
+    job_info = client.get(f"/api/jobs/{job_id}/rerun-plan").json()
+    # If not provided, it defaults to 1024 because of `Form(1024)` in `create_job`
+    assert job_info["settings"]["geometry_resolution"] == 1024
+    assert job_info["settings"]["fast"] is False
+
+    # 5. A rerun reproduces original generation options
+    import time
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if client.get(f"/api/jobs/{job_id}/rerun-plan").json()["status"] in ("done", "failed"):
+            break
+        time.sleep(0.05)
+    rerun_res = client.post(f"/api/jobs/{job_id}/rerun", data={})
+    assert rerun_res.status_code == 200
+    new_job_id = rerun_res.json()["job_id"]
+    new_job_info = client.get(f"/api/jobs/{new_job_id}/rerun-plan").json()
+    assert new_job_info["settings"]["geometry_resolution"] == 1024
+    assert new_job_info["settings"]["fast"] is False
