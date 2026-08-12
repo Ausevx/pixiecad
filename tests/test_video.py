@@ -54,9 +54,6 @@ def blurry_video(tmp_path) -> Path:
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
-@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
-@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
-@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
 def test_missing_ffmpeg(sharp_video: Path, tmp_path: Path, monkeypatch):
     """A missing ffmpeg produces a clear, actionable error."""
     monkeypatch.setattr(shutil, "which", lambda cmd: None)
@@ -122,6 +119,48 @@ def test_frames_span_the_whole_clip(tmp_path):
     assert max(levels) - min(levels) > 120, (
         f"selected frames only span brightness {min(levels):.0f}-{max(levels):.0f}, "
         "so they came from a narrow slice of the clip"
+    )
+
+
+def _long_ramp_video(path: Path) -> Path:
+    """A 30s 60fps ramp: 1800 frames, far past any plausible output cap.
+
+    Built by ffmpeg rather than frame by frame like `_ramp_video`, because
+    1800 PNGs at the 640px minimum resolution is several hundred MB of scratch
+    space. testsrc2 supplies the texture that `assess_quality` needs to score
+    a frame as sharp; `eq` supplies the brightness ramp that makes each
+    frame's position in the clip readable from its pixels.
+    """
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi",
+         "-i", "testsrc2=size=640x640:rate=60:duration=30",
+         "-vf", "eq=brightness=-0.45+(t/30)*0.9:eval=frame",
+         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
+         "-pix_fmt", "yuv420p", str(path)],
+        capture_output=True, check=True,
+    )
+    return path
+
+
+@pytest.mark.skipif(not _HAVE_FFMPEG, reason="ffmpeg not installed")
+def test_a_long_clip_is_sampled_all_the_way_to_its_end(tmp_path):
+    """Sampling must reach the end of the clip, however long the clip is.
+
+    Every other fixture here is 90 frames, which is why they all passed while
+    `thumbnail=3` with `-frames:v 192` was capping decode at ~576 input
+    frames. On a 30s 60fps orbit that cap ended extraction at 9.58s -- about
+    120 degrees of arc -- and the buckets then spread themselves evenly over
+    that prefix and reported full coverage. This clip is long enough for the
+    cap to bite.
+    """
+    video = _long_ramp_video(tmp_path / "long.mp4")
+    levels = _mean_levels(extract_frames(video, tmp_path / "out", target=32))
+
+    # The ramp runs ~70 -> ~180. Truncated at a third of the clip, the last
+    # frame measured ~101; sampled across the whole clip it measures ~180.
+    assert levels[-1] > 150, (
+        f"the last selected frame has brightness {levels[-1]:.0f}, so it came "
+        "from partway through the clip, not the end of it"
     )
 
 
