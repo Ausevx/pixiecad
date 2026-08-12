@@ -23,3 +23,7 @@ jobs/
 node_modules/
 frontend/node_modules/
 src/pixiecad/web/static/dist/
+
+# Debug/repro model drops at the repo root. Job artifacts under
+# workspace/, runs/ and jobs/ are already ignored above.
+/*.glb

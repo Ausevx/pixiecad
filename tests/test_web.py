@@ -39,8 +39,6 @@ def client(tmp_path: Path):
 def test_get_root(client):
     """/ redirects into the SPA; following it must land on the real app."""
     from pixiecad.web import app as m
-    import pathlib
-    import pytest
     dist = pathlib.Path(m.__file__).parent / "static" / "dist"
     if not (dist / "index.html").is_file():
         pytest.skip("SPA bundle not built")

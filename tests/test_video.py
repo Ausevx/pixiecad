@@ -54,9 +54,6 @@ def blurry_video(tmp_path) -> Path:
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
-@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
-@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
-@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
 def test_missing_ffmpeg(sharp_video: Path, tmp_path: Path, monkeypatch):
     """A missing ffmpeg produces a clear, actionable error."""
     monkeypatch.setattr(shutil, "which", lambda cmd: None)
