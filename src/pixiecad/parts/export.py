@@ -35,6 +35,14 @@ class ExportedPart:
     faces: int
     target_faces: int
     volume_fraction: float
+    # All three are world space, in the coordinates of the model the parts were
+    # split from, so a consumer can reassemble the parts by placing them as
+    # exported. centroid and extents describe the part as segmented; bbox is
+    # measured on the decimated mesh actually written to the .glb, so it matches
+    # the geometry in the file rather than the geometry it was derived from.
+    centroid: list[float]
+    extents: list[float]
+    bbox: list[list[float]]
 
 
 def export_parts(
@@ -78,6 +86,7 @@ def export_parts(
         export_glb(
             mesh,
             path,
+            node_name=stem,
             extras={
                 "part_index": part.index,
                 "part_name": part.name,
@@ -93,6 +102,9 @@ def export_parts(
                 faces=len(mesh.faces),
                 target_faces=target,
                 volume_fraction=round(part.volume / total_volume, 4),
+                centroid=[float(v) for v in part.centroid],
+                extents=[float(v) for v in part.extents],
+                bbox=[[float(v) for v in pt] for pt in mesh.bounds],
             )
         )
 

@@ -90,6 +90,7 @@ def finish_model(
     *,
     conditioning_image: str | Path | None = None,
     log: Callable[[str], None] = lambda _m: None,
+    cache_dir: str | Path | None = None,
 ) -> FinishReport:
     """Apply the requested finishing stages to an existing model.
 
@@ -173,7 +174,9 @@ def finish_model(
                 report.warnings.append(f"texturing failed: {exc}")
                 log(f"WARNING: {report.warnings[-1]}")
 
-    parts_objs = _segment(mesh, options, report, log)
+    # Cache SAM labels under out_dir/stages so repeated finishes reuse them.
+    effective_cache_dir = Path(cache_dir) if cache_dir is not None else out_dir / "stages"
+    parts_objs = _segment(mesh, options, report, log, cache_dir=effective_cache_dir)
 
     if parts_objs:
         from ..parts.export import export_parts
@@ -283,7 +286,13 @@ def run_semantic_segmentation(
     return parts, used_cache
 
 
-def _segment(mesh, options: FinishOptions, report: FinishReport, log) -> list:
+def _segment(
+    mesh,
+    options: FinishOptions,
+    report: FinishReport,
+    log,
+    cache_dir: str | Path | None = None,
+) -> list:
     """Split the mesh, semantically if asked for and possible."""
     from ..parts.segment import split_parts
 
@@ -293,6 +302,7 @@ def _segment(mesh, options: FinishOptions, report: FinishReport, log) -> list:
                 mesh,
                 _executor(options.gpu_host),
                 options.max_parts,
+                cache_dir=cache_dir,
                 log=log,
             )
             log(f"Semantic segmentation produced {len(parts)} parts.")

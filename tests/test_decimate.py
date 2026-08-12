@@ -70,6 +70,65 @@ def test_decimate_input_mesh_unmutated():
     np.testing.assert_array_equal(mesh.faces, orig_f)
 
 
+def test_decimate_preserves_texture():
+    mesh = trimesh.creation.icosphere(subdivisions=3)
+    uvs = np.random.rand(len(mesh.vertices), 2)
+    mat = trimesh.visual.material.PBRMaterial()
+    mesh.visual = trimesh.visual.TextureVisuals(uv=uvs, material=mat)
+
+    decimated, _ = decimate_to_budget(mesh, 400)
+    assert isinstance(decimated.visual, trimesh.visual.TextureVisuals)
+    assert decimated.visual.uv is not None
+    assert len(decimated.visual.uv) == len(decimated.vertices)
+    assert decimated.visual.material is mat
+
+
+def test_decimate_already_below_budget_preserves_texture():
+    mesh = trimesh.creation.icosphere(subdivisions=2)
+    uvs = np.random.rand(len(mesh.vertices), 2)
+    mat = trimesh.visual.material.PBRMaterial()
+    mesh.visual = trimesh.visual.TextureVisuals(uv=uvs, material=mat)
+
+    decimated, _ = decimate_to_budget(mesh, 500)
+    assert isinstance(decimated.visual, trimesh.visual.TextureVisuals)
+    assert decimated.visual.uv is not None
+    assert len(decimated.visual.uv) == len(decimated.vertices)
+
+
+def test_decimate_preserves_vertex_colors():
+    mesh = trimesh.creation.icosphere(subdivisions=3)
+    colors = np.random.randint(0, 255, (len(mesh.vertices), 4))
+    mesh.visual = trimesh.visual.ColorVisuals(vertex_colors=colors)
+
+    decimated, _ = decimate_to_budget(mesh, 400)
+    assert decimated.visual.kind == "vertex"
+    assert decimated.visual.vertex_colors is not None
+    assert len(decimated.visual.vertex_colors) == len(decimated.vertices)
+
+
+def test_decimate_untextured_remains_untextured():
+    mesh = trimesh.creation.icosphere(subdivisions=3)
+    decimated, _ = decimate_to_budget(mesh, 400)
+
+    assert not isinstance(decimated.visual, trimesh.visual.TextureVisuals)
+    assert not getattr(decimated.visual, "defined", False)
+
+
+def test_decimate_input_mesh_unmutated_visuals():
+    mesh = trimesh.creation.icosphere(subdivisions=3)
+    orig_v_count = len(mesh.vertices)
+    orig_uvs = np.random.rand(orig_v_count, 2)
+    mesh.visual = trimesh.visual.TextureVisuals(uv=orig_uvs)
+
+    orig_uv_id = id(mesh.visual.uv)
+
+    decimate_to_budget(mesh, 400)
+
+    assert len(mesh.vertices) == orig_v_count
+    assert id(mesh.visual.uv) == orig_uv_id
+    np.testing.assert_array_equal(mesh.visual.uv, orig_uvs)
+
+
 def test_budget_for_parts_proportional():
     parts = {"chassis": 50000, "wheels": 10000}
     budget = 10000

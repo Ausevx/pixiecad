@@ -1,10 +1,14 @@
-"""S5 part splitting: segmentation, budgets, export."""
-
 import json
+import sys
+from pathlib import Path
+
+# Ensure worktree src/ is prioritized over installed packages
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import pytest
 import trimesh
 
+from pixiecad.export import export_glb
 from pixiecad.parts import export_parts, slugify, split_parts
 
 
@@ -109,6 +113,21 @@ def test_export_parts_writes_files_and_manifest(tmp_path):
     for e in exported:
         assert (tmp_path / e.file).exists()
         assert (tmp_path / e.file).stat().st_size > 0
+        # Ensure returned dataclass values are plain Python lists of floats.
+        assert type(e.centroid) is list
+        assert all(type(v) is float for v in e.centroid)
+        assert type(e.extents) is list
+        assert all(type(v) is float for v in e.extents)
+        assert type(e.bbox) is list
+        assert len(e.bbox) == 2
+        assert all(type(pt) is list and len(pt) == 3 and all(type(v) is float for v in pt) for pt in e.bbox)
+
+        # Ensure scene node in exported GLB is named after the part.
+        scene = trimesh.load(tmp_path / e.file)
+        expected_node = e.file.removesuffix(".glb")
+        assert expected_node in scene.geometry
+        assert expected_node in scene.graph.nodes
+        assert "model" not in scene.geometry
 
     data = json.loads(manifest.read_text())
     assert data["n_parts"] == len(parts)
@@ -116,6 +135,42 @@ def test_export_parts_writes_files_and_manifest(tmp_path):
     assert data["named"] is True
     # Duplicate names must not collide on disk.
     assert len({e.file for e in exported}) == len(exported)
+
+    # Manifest must carry placement and bounding box fields for every part.
+    for item in data["parts"]:
+        assert "centroid" in item
+        assert "extents" in item
+        assert "bbox" in item
+        assert isinstance(item["centroid"], list) and len(item["centroid"]) == 3
+        assert isinstance(item["extents"], list) and len(item["extents"]) == 3
+        assert isinstance(item["bbox"], list) and len(item["bbox"]) == 2
+        assert all(type(v) in (float, int) for v in item["centroid"])
+        assert all(type(v) in (float, int) for v in item["extents"])
+        assert all(isinstance(pt, list) and len(pt) == 3 and all(type(v) in (float, int) for v in pt) for pt in item["bbox"])
+
+
+def test_export_glb_default_node_name(tmp_path):
+    box = trimesh.creation.box()
+    glb_path = export_glb(box, tmp_path / "default.glb")
+    scene = trimesh.load(glb_path)
+    assert "model" in scene.geometry
+    assert "model" in scene.graph.nodes
+
+
+def test_export_glb_custom_and_sanitized_node_name(tmp_path):
+    box = trimesh.creation.box()
+    path1 = export_glb(box, tmp_path / "custom.glb", node_name="custom-node")
+    scene1 = trimesh.load(path1)
+    assert "custom-node" in scene1.geometry
+    assert "custom-node" in scene1.graph.nodes
+
+    path2 = export_glb(box, tmp_path / "sanitized.glb", node_name="foo/bar\\baz")
+    scene2 = trimesh.load(path2)
+    assert "foo-bar-baz" in scene2.geometry
+
+    path3 = export_glb(box, tmp_path / "fallback.glb", node_name="///")
+    scene3 = trimesh.load(path3)
+    assert "model" in scene3.geometry
 
 
 def test_export_requires_parts(tmp_path):

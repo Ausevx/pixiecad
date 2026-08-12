@@ -30,3 +30,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pixiecad"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers -m \"not slow and not network\""
+markers = [
+    "slow: heavy or long-running; excluded from the default run",
+    "network: needs network access; excluded from the default run",
+]

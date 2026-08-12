@@ -129,6 +129,55 @@ class TestFinishModel:
         assert FinishOptions(texture=True).needs_gpu
         assert FinishOptions(segmentation="semantic").needs_gpu
 
+    def test_semantic_segmentation_passes_cache_dir(self, tmp_path: Path):
+        """Dashboard finishing path must thread a non-None stages cache_dir to SAM."""
+        from unittest.mock import patch
+
+        path = tmp_path / "model.glb"
+        trimesh.creation.box().export(path)
+
+        captured_cache_dir: list[Path | None] = []
+
+        def fake_run_semantic_segmentation(mesh, executor, max_parts, *, cache_dir=None, log=lambda _m: None):
+            captured_cache_dir.append(cache_dir)
+            return [], False
+
+        with patch("pixiecad.web.finishing.run_semantic_segmentation", fake_run_semantic_segmentation):
+            finish_model(
+                path,
+                tmp_path,
+                FinishOptions(segmentation="semantic", gpu_host="gpu.example.invalid"),
+            )
+
+        assert len(captured_cache_dir) == 1
+        assert captured_cache_dir[0] is not None
+        assert captured_cache_dir[0] == tmp_path / "stages"
+
+    def test_finish_model_accepts_custom_cache_dir(self, tmp_path: Path):
+        """Passing an explicit cache_dir to finish_model overrides the default stages dir."""
+        from unittest.mock import patch
+
+        path = tmp_path / "model.glb"
+        trimesh.creation.box().export(path)
+
+        captured_cache_dir: list[Path | None] = []
+
+        def fake_run_semantic_segmentation(mesh, executor, max_parts, *, cache_dir=None, log=lambda _m: None):
+            captured_cache_dir.append(cache_dir)
+            return [], False
+
+        custom_cache = tmp_path / "custom_cache"
+        with patch("pixiecad.web.finishing.run_semantic_segmentation", fake_run_semantic_segmentation):
+            finish_model(
+                path,
+                tmp_path,
+                FinishOptions(segmentation="semantic", gpu_host="gpu.example.invalid"),
+                cache_dir=custom_cache,
+            )
+
+        assert len(captured_cache_dir) == 1
+        assert captured_cache_dir[0] == custom_cache
+
 
 class TestTexturingKeepsTheFaceBudget:
     """Texturing must not silently discard the face budget.

@@ -17,6 +17,56 @@ class DecimateResult:
     achieved_exact: bool
 
 
+def _carry_visual(source: trimesh.Trimesh, result: trimesh.Trimesh, new_vertices) -> None:
+    """Copy texture or colour data from `source` onto the decimated `result`.
+
+    pyfqmr returns bare geometry and gives no correspondence back to the input
+    vertices, so the mapping has to be reconstructed: for each decimated vertex,
+    take the attribute of the nearest original vertex. Simplification moves
+    vertices only along the surface it is collapsing, so nearest-original is a
+    good approximation and needs no barycentric interpolation.
+
+    A mesh with nothing worth carrying is left exactly as it was — attaching an
+    empty TextureVisuals would change behaviour for untextured meshes and can
+    inflate an export. Failure degrades to untextured geometry rather than
+    raising, because the face budget is the caller's contract and a malformed
+    UV array must not cost them a mesh.
+    """
+    visual = getattr(source, "visual", None)
+    if visual is None:
+        return
+
+    try:
+        from scipy.spatial import cKDTree
+
+        def nearest():
+            return cKDTree(source.vertices).query(new_vertices)[1]
+
+        if isinstance(visual, trimesh.visual.TextureVisuals):
+            uv = getattr(visual, "uv", None)
+            material = getattr(visual, "material", None)
+            # A TextureVisuals can carry a material with no UVs at all; that is
+            # still worth keeping, so the two are handled independently.
+            new_uv = None
+            if uv is not None and len(uv) == len(source.vertices):
+                new_uv = uv[nearest()].copy()
+            if new_uv is not None or material is not None:
+                result.visual = trimesh.visual.TextureVisuals(uv=new_uv, material=material)
+
+        elif isinstance(visual, trimesh.visual.ColorVisuals):
+            # Only vertex colours have a meaningful per-vertex mapping. Face
+            # colours are dropped; see this function's caller docs.
+            if getattr(visual, "kind", None) == "vertex":
+                vc = getattr(visual, "vertex_colors", None)
+                if vc is not None and len(vc) == len(source.vertices):
+                    result.visual = trimesh.visual.ColorVisuals(
+                        vertex_colors=vc[nearest()].copy()
+                    )
+    except (ImportError, ValueError, IndexError, AttributeError, TypeError):
+        # Degrade to untextured geometry; the budget still holds.
+        return
+
+
 def decimate_to_budget(
     mesh: trimesh.Trimesh,
     target_faces: int,
@@ -105,6 +155,8 @@ def decimate_to_budget(
             best_count = len(f3)
 
     result_mesh = trimesh.Trimesh(vertices=best_v, faces=best_f, process=False)
+    _carry_visual(mesh, result_mesh, best_v)
+
     result_info = DecimateResult(
         faces_before=faces_before,
         faces_after=best_count,

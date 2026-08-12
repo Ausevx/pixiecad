@@ -142,6 +142,7 @@ def _long_ramp_video(path: Path) -> Path:
     return path
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not _HAVE_FFMPEG, reason="ffmpeg not installed")
 def test_a_long_clip_is_sampled_all_the_way_to_its_end(tmp_path):
     """Sampling must reach the end of the clip, however long the clip is.
