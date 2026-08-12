@@ -190,6 +190,10 @@ function RerunJob({
 export function JobDetailRoute({ jobId }: { jobId: string }) {
   const { job, log, files, loading, notFound, error, refresh } = useJob(jobId);
   const reduced = useReducedMotion();
+  // WebGL availability is reported upward by ModelViewer when the canvas
+  // context fails to create. Reserving 26rem for a panel that only contains a
+  // two-line error message wastes screen space above the diagnostic logs.
+  const [webglUnavailable, setWebglUnavailable] = useState<boolean>(false);
 
   if (notFound) {
     return (
@@ -298,7 +302,11 @@ export function JobDetailRoute({ jobId }: { jobId: string }) {
                     </div>
                   )}
                 >
-                  <ModelViewerLazy url={job.glb_url} className="h-[26rem]" />
+                  <ModelViewerLazy
+                    url={job.glb_url}
+                    className={webglUnavailable ? "h-28" : "h-[26rem]"}
+                    onWebglUnavailable={() => setWebglUnavailable(true)}
+                  />
                 </ErrorBoundary>
               ) : (
                 <div className="flex h-[26rem] items-center justify-center rounded-panel border border-rule bg-void">

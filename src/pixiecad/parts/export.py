@@ -17,6 +17,8 @@ from typing import Any
 
 from ..export import export_glb
 from ..meshops import budget_for_parts, decimate_to_budget
+from ..meshops.repack import repack_texture
+from ..meshops.webexport import part_texture_size
 from .segment import Part
 
 _SAFE = re.compile(r"[^a-z0-9]+")
@@ -73,6 +75,17 @@ def export_parts(
     for key, part in zip(keys, parts):
         target = budgets[key]
         mesh, _ = decimate_to_budget(part.mesh, target)
+
+        # Each part otherwise ships a copy of the whole model's atlas, so an
+        # N-part export carries N copies of one image. Repacking gives the part
+        # a tight texture sized to its share of the budget. It is best-effort:
+        # a part that cannot be repacked still exports with the atlas it has,
+        # because a slightly fat file beats failing the export.
+        tex_size = part_texture_size(target, total_budget)
+        try:
+            mesh = repack_texture(mesh, tex_size)
+        except (ValueError, IndexError, AttributeError, TypeError, MemoryError):
+            pass
 
         base = slugify(part.name or f"part-{part.index:02d}")
         stem = base

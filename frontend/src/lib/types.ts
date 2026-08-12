@@ -265,7 +265,6 @@ export interface NewJobParams {
   length?: string;
   width?: string;
   height?: string;
-  mode?: string;
   split: boolean;
   object_hint?: string;
   backend?: string;

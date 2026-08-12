@@ -34,6 +34,7 @@ export function LogPanel(props: {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const [copied, setCopied] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [scrollTop, setScrollTop] = useState(0);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
@@ -48,6 +49,7 @@ export function LogPanel(props: {
     const el = scrollRef.current;
     if (el) {
       el.scrollTop = el.scrollHeight;
+      setScrollTop(el.scrollTop);
       isAtBottomRef.current = true;
       setUnreadCount(0);
     }
@@ -57,6 +59,8 @@ export function LogPanel(props: {
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+
+    setScrollTop(el.scrollTop);
 
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     const atBottom = distanceFromBottom <= 40;
@@ -79,6 +83,7 @@ export function LogPanel(props: {
     if (diff > 0) {
       if (isAtBottomRef.current) {
         scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        setScrollTop(scrollRef.current.scrollTop);
         setUnreadCount(0);
       } else {
         setUnreadCount((prev) => prev + diff);
@@ -92,6 +97,7 @@ export function LogPanel(props: {
   useLayoutEffect(() => {
     if (isOpen && scrollRef.current && isAtBottomRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      setScrollTop(scrollRef.current.scrollTop);
     }
   }, [isOpen]);
 
@@ -121,6 +127,25 @@ export function LogPanel(props: {
       }
     };
   }, []);
+
+  const ROW_HEIGHT = 20;
+  const OVERSCAN = 10;
+  const VIRTUAL_THRESHOLD = 200;
+  const isVirtualized = lines.length > VIRTUAL_THRESHOLD;
+
+  let startIndex = 0;
+  let endIndex = lines.length;
+  if (isVirtualized) {
+    const clientHeight = scrollRef.current?.clientHeight || 320;
+    const visibleStart = Math.floor(scrollTop / ROW_HEIGHT);
+    const visibleEnd = Math.ceil((scrollTop + clientHeight) / ROW_HEIGHT);
+    startIndex = Math.max(0, visibleStart - OVERSCAN);
+    endIndex = Math.min(lines.length, visibleEnd + OVERSCAN);
+  }
+
+  const visibleLines = isVirtualized ? lines.slice(startIndex, endIndex) : lines;
+  const paddingTop = isVirtualized ? startIndex * ROW_HEIGHT : 0;
+  const paddingBottom = isVirtualized ? (lines.length - endIndex) * ROW_HEIGHT : 0;
 
   const formattedCount = formatCount(lines.length);
   const lineLabel = lines.length === 1 ? 'line' : 'lines';
@@ -234,25 +259,33 @@ export function LogPanel(props: {
               onScroll={handleScroll}
               role="log"
               tabIndex={0}
-              className="flex-1 max-h-80 overflow-y-auto py-1 px-2 font-mono text-xs leading-relaxed focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+              className="flex-1 max-h-80 overflow-y-auto overflow-x-auto py-1 px-2 font-mono text-xs leading-relaxed focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
             >
               {lines.length === 0 ? (
                 <div className="text-ink-faint italic py-2">No output recorded.</div>
               ) : (
-                lines.map((line, index) => {
-                  const styleClass = getLineClass(line);
-                  const isIndented = line.startsWith('  ');
-                  return (
-                    <div
-                      key={index}
-                      className={`whitespace-pre-wrap break-words ${styleClass} ${
-                        isIndented ? 'pl-4' : ''
-                      }`}
-                    >
-                      {line}
-                    </div>
-                  );
-                })
+                /* Both paths render a row identically, so crossing the
+                   virtualisation threshold changes only how many nodes are
+                   mounted — never how the log looks. Rows do not wrap: a
+                   windowed row has to be exactly ROW_HEIGHT for the scroll
+                   maths to hold, and a log reads better scrolled sideways than
+                   reflowed anyway. */
+                <div style={{ paddingTop, paddingBottom }}>
+                  {visibleLines.map((line, relativeIndex) => {
+                    const index = startIndex + relativeIndex;
+                    return (
+                      <div
+                        key={index}
+                        className={`whitespace-pre ${getLineClass(line)} ${
+                          line.startsWith('  ') ? 'pl-4' : ''
+                        }`}
+                        style={{ height: ROW_HEIGHT, lineHeight: `${ROW_HEIGHT}px` }}
+                      >
+                        {line}
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
 

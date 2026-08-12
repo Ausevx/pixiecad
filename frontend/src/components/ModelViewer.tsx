@@ -25,8 +25,9 @@ function disposeMaterial(mat: THREE.Material): void {
 export default function ModelViewer(props: {
   url: string;
   className?: string;
+  onWebglUnavailable?: () => void;
 }): React.JSX.Element {
-  const { url, className } = props;
+  const { url, className, onWebglUnavailable } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<boolean>(false);
@@ -34,6 +35,15 @@ export default function ModelViewer(props: {
   // point offering to, so it gets its own honest message.
   const [noWebgl, setNoWebgl] = useState<boolean>(false);
   const [triangleCount, setTriangleCount] = useState<number | null>(null);
+  const reportedUnavailableRef = useRef<boolean>(false);
+
+  // Notify parent component when WebGL context creation fails so layout can adapt.
+  useEffect(() => {
+    if (noWebgl && !reportedUnavailableRef.current) {
+      reportedUnavailableRef.current = true;
+      onWebglUnavailable?.();
+    }
+  }, [noWebgl, onWebglUnavailable]);
 
   const isPageVisible = usePageVisible();
   const isReducedMotion = useReducedMotion();

@@ -48,6 +48,7 @@ const LABEL: Record<string, string> = {
   // fail here without failing the job, so it must be visible.
   sanity: "sanity",
   parts: "parts",
+  regime: "regime",
 };
 
 type State = "ok" | "failed" | "skipped" | "running" | "pending";

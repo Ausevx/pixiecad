@@ -5,6 +5,7 @@ const ModelViewer = React.lazy(() => import("./ModelViewer"));
 export function ModelViewerLazy(props: {
   url: string;
   className?: string;
+  onWebglUnavailable?: () => void;
 }): React.JSX.Element {
   return (
     <Suspense

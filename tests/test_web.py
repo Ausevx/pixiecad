@@ -78,6 +78,8 @@ def test_post_jobs_and_get_job(client):
     assert detail_res.status_code == 200
     detail = detail_res.json()
     assert detail["status"] in ("queued", "running", "done", "failed")
+    assert "mode" not in detail
+    assert "mode" not in detail.get("settings", {})
 
 
 def test_get_model_glb_missing(client):
@@ -344,8 +346,8 @@ class TestFinishingOptionsWiring:
 
         source = inspect.getsource(app_module.create_app)
         for f_name in self._new_job_params():
-            if f_name == "view_tags":
-                continue  # sent as JSON under its own name, asserted below
+            if f_name in ("view_tags", "mode"):
+                continue  # view_tags is sent as JSON under its own name; mode was removed as dead field
             assert f"{f_name}:" in source, f"{f_name} not accepted by /api/jobs"
         assert "view_tags" in source
 

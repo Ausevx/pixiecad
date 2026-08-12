@@ -959,7 +959,6 @@ def create_app(root: Path) -> FastAPI:
         length: str | None = Form(None),
         width: str | None = Form(None),
         height: str | None = Form(None),
-        mode: str = Form("auto"),
         split: bool = Form(True),
         object_hint: str | None = Form(None),
         backend: str | None = Form(None),
@@ -1086,7 +1085,6 @@ def create_app(root: Path) -> FastAPI:
         # image -- is exactly the one you want to retry after a restart, and
         # re-picking a dozen options by hand is not a retry.
         settings = {
-            "mode": mode,
             "split": split,
             "object_hint": hint_val,
             "backend": backend_val,
@@ -1122,7 +1120,6 @@ def create_app(root: Path) -> FastAPI:
             "warnings": [],
             "stages": [],
             "created_at": session.created_at,
-            "mode": mode,
             "split": split,
             "object_hint": hint_val,
             "backend": backend_val,
@@ -1278,7 +1275,6 @@ def create_app(root: Path) -> FastAPI:
         # user actually changed, and a bare POST still reproduces the old run.
         name: str | None = Form(None),
         target_faces: int | None = Form(None),
-        mode: str | None = Form(None),
         split: bool | None = Form(None),
         object_hint: str | None = Form(None),
         backend: str | None = Form(None),
@@ -1331,7 +1327,7 @@ def create_app(root: Path) -> FastAPI:
         # distinct from an empty string, which is a real value for the text
         # fields (clearing the object hint, say).
         overrides = {
-            "mode": mode, "split": split, "object_hint": object_hint,
+            "split": split, "object_hint": object_hint,
             "backend": backend, "length": length, "width": width,
             "height": height, "smooth_iterations": smooth_iterations,
             "texture": texture, "segmentation": segmentation,
@@ -1429,7 +1425,6 @@ def create_app(root: Path) -> FastAPI:
             "warnings": [],
             "stages": [],
             "created_at": session.created_at,
-            "mode": settings.get("mode", "auto"),
             "split": bool(settings.get("split", True)),
             "object_hint": settings.get("object_hint"),
             "backend": settings.get("backend"),

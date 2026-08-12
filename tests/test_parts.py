@@ -182,3 +182,48 @@ def test_slugify():
     assert slugify("Front Left Wheel") == "front-left-wheel"
     assert slugify("  ") == "part"
     assert slugify("A/B\\C") == "a-b-c"
+
+import numpy as np
+from PIL import Image
+
+def test_export_parts_repacks_texture(tmp_path):
+    whole = _car_like()
+    # add texture
+    uvs = np.random.rand(len(whole.vertices), 2)
+    whole.visual = trimesh.visual.TextureVisuals(uv=uvs)
+    atlas = Image.new("RGB", (1024, 1024), color="blue")
+    whole.visual.material = trimesh.visual.material.PBRMaterial(baseColorTexture=atlas)
+    
+    parts = split_parts(whole, method="connected")
+    exported, manifest = export_parts(parts, tmp_path, total_budget=2000, whole_volume=whole.volume)
+    
+    assert len(exported) == len(parts)
+    for e in exported:
+        part_mesh = trimesh.load(tmp_path / e.file, force="mesh", process=False)
+        assert hasattr(part_mesh.visual, "uv")
+        assert part_mesh.visual.uv is not None
+        # UVs must be within [0, 1]
+        assert np.all(part_mesh.visual.uv >= -1e-5)
+        assert np.all(part_mesh.visual.uv <= 1.0 + 1e-5)
+        
+        # Check texture is smaller
+        mat = part_mesh.visual.material
+        tex = getattr(mat, "baseColorTexture", None) or getattr(mat, "image", None)
+        assert tex is not None
+        # Should be smaller than the full 1024 atlas (since the budget is small)
+        assert tex.size[0] < 1024
+        assert tex.size[1] < 1024
+        # Must be power of 2
+        assert tex.size[0] in [128, 256, 512, 1024]
+
+def test_export_parts_degrades_gracefully_no_texture(tmp_path):
+    whole = _car_like()
+    # no texture
+    parts = split_parts(whole, method="connected")
+    exported, manifest = export_parts(parts, tmp_path, total_budget=2000, whole_volume=whole.volume)
+    
+    assert len(exported) == len(parts)
+    for e in exported:
+        part_mesh = trimesh.load(tmp_path / e.file, force="mesh", process=False)
+        # Should export successfully
+        pass
