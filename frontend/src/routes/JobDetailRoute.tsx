@@ -5,7 +5,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { LogPanel } from "@/components/LogPanel";
 import { ModelViewerLazy } from "@/components/ModelViewerLazy";
 import { PipelineTrack } from "@/components/PipelineTrack";
-import { deleteJob, formatBytes, formatCount, optimizeJob } from "@/lib/api";
+import { deleteJob, cancelJob, formatBytes, formatCount, optimizeJob } from "@/lib/api";
 import { useReducedMotion } from "@/lib/hooks";
 import { jobLayoutId, snap } from "@/lib/motion";
 import { refreshJobs } from "@/lib/jobs";
@@ -23,12 +23,43 @@ import { toast } from "@/shell/toast";
    the bottom of a long scroll.
    ───────────────────────────────────────────────────────────────────────── */
 
-const STATUS_STYLE: Record<JobStatus, string> = {
+const STATUS_STYLE: Record<string, string> = {
   queued: "border-rule bg-panel text-ink-dim",
   running: "border-accent-dim bg-accent-wash text-accent",
   done: "border-ok-edge bg-ok-wash text-ok",
   failed: "border-fail-edge bg-fail-wash text-fail",
+  cancelled: "border-warn-edge bg-warn-wash text-warn",
 };
+
+function CancelJob({ jobId, running, onDone }: { jobId: string; running: boolean; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+
+  if (!running) return null;
+
+  const run = async () => {
+    setBusy(true);
+    try {
+      await cancelJob(jobId);
+      toast("ok", "Cancellation requested", "The job will stop at the next checkpoint.");
+      onDone();
+    } catch (e) {
+      toast("fail", "Cancel failed", e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => void run()}
+      className="rounded-sharp border border-warn-edge px-2 py-1 font-mono text-[10px] uppercase tracking-widest text-warn hover:bg-warn-wash hover:text-warn disabled:opacity-50"
+    >
+      {busy ? "cancelling…" : "cancel"}
+    </button>
+  );
+}
 
 function DeleteJob({ jobId, running }: { jobId: string; running: boolean }) {
   const [confirming, setConfirming] = useState(false);
@@ -242,13 +273,14 @@ export function JobDetailRoute({ jobId }: { jobId: string }) {
                   ? { duration: 1.6, repeat: Infinity, ease: "easeInOut" }
                   : snap
               }
-              className={`rounded-panel border px-2 py-1 font-mono text-[10px] uppercase tracking-widest ${STATUS_STYLE[job.status]}`}
+              className={`rounded-panel border px-2 py-1 font-mono text-[10px] uppercase tracking-widest ${STATUS_STYLE[job.status] || ""}`}
             >
               {job.status}
               {!isTerminal(job.status) && job.stage ? ` · ${job.stage}` : ""}
             </motion.span>
           )}
           <RerunJob jobId={jobId} status={job?.status} />
+          <CancelJob jobId={jobId} running={job?.status === "running"} onDone={refresh} />
           <DeleteJob jobId={jobId} running={job?.status === "running"} />
         </div>
       </div>
@@ -313,6 +345,8 @@ export function JobDetailRoute({ jobId }: { jobId: string }) {
                   <p className="font-mono text-[12px] text-ink-faint">
                     {job.status === "failed"
                       ? "no model was produced"
+                      : job.status === "cancelled"
+                      ? "job was cancelled"
                       : "no model yet"}
                   </p>
                 </div>

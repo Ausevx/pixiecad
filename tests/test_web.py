@@ -1688,3 +1688,69 @@ class TestOneJobPerGpuHost:
             "the guard must live in the shared dispatch, which create_job and "
             "rerun both go through -- not in create_job alone"
         )
+
+
+class TestJobCancellation:
+    def test_cancel_unknown_job(self, tmp_path: Path):
+        import pixiecad.web.app
+        print("APP FILE:", pixiecad.web.app.__file__)
+        app = create_app(tmp_path)
+        client = TestClient(app)
+        res = client.post("/api/jobs/unknown-id/cancel")
+        assert res.status_code == 404
+
+    def test_cancel_finished_job(self, tmp_path: Path):
+        app = create_app(tmp_path)
+        client = TestClient(app)
+        from uuid import uuid4
+        jid = uuid4().hex[:8]
+        app.state.jobs[jid] = {
+            "job_id": jid,
+            "name": "test",
+            "status": "done",
+            "stage": "complete",
+            "target_faces": 20000,
+            "log": [],
+            "stages": [],
+            "warnings": [],
+            "dir": str(tmp_path),
+            "parts": [],
+            "settings": {},
+            "finish": {},
+            "report": None,
+            "glb_url": None,
+        }
+        print("JOBS DICT:", app.state.jobs)
+        res = client.post(f"/api/jobs/{jid}/cancel")
+        print("RESPONSE JSON:", res.json())
+        assert res.status_code == 200
+        assert "Cancellation requested" not in " ".join(app.state.jobs[jid]["log"])
+
+    def test_cancel_running_job(self, tmp_path: Path):
+        import threading
+        app = create_app(tmp_path)
+        client = TestClient(app)
+        from uuid import uuid4
+        jid = uuid4().hex[:8]
+        event = threading.Event()
+        app.state.jobs[jid] = {
+            "job_id": jid,
+            "name": "test",
+            "status": "running",
+            "stage": "build",
+            "target_faces": 20000,
+            "log": [],
+            "stages": [],
+            "warnings": [],
+            "dir": str(tmp_path),
+            "parts": [],
+            "cancel_event": event,
+            "settings": {},
+            "finish": {},
+            "report": None,
+            "glb_url": None,
+        }
+        res = client.post(f"/api/jobs/{jid}/cancel")
+        assert res.status_code == 200
+        assert event.is_set()
+        assert any("Cancellation requested" in line for line in app.state.jobs[jid]["log"])

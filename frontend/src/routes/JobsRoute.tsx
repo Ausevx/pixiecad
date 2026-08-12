@@ -18,6 +18,9 @@ const STATUS: Record<JobStatus, { glyph: string; className: string }> = {
   running: { glyph: "◐", className: "text-accent" },
   done: { glyph: "●", className: "text-ok" },
   failed: { glyph: "▲", className: "text-fail" },
+  // Warn rather than fail: the user asked for this one to stop, so it is not
+  // an error and should not read like one in a list of runs.
+  cancelled: { glyph: "⊘", className: "text-warn" },
 };
 
 type Filter = "all" | "active" | "done" | "failed";

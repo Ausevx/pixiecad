@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import threading
 from typing import Any, Callable
 
 import trimesh
@@ -91,6 +92,7 @@ def finish_model(
     conditioning_image: str | Path | None = None,
     log: Callable[[str], None] = lambda _m: None,
     cache_dir: str | Path | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> FinishReport:
     """Apply the requested finishing stages to an existing model.
 
@@ -101,6 +103,10 @@ def finish_model(
     glb_path, out_dir = Path(glb_path), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     report = FinishReport(model_path=glb_path)
+
+    if cancel_event and cancel_event.is_set():
+        report.warnings.append("Finishing cancelled before start.")
+        return report
 
     mesh = trimesh.load(glb_path, force="mesh", process=False)
 
@@ -115,6 +121,9 @@ def finish_model(
     mesh.export(glb_path)
     report.steps.append("weld_normals")
 
+    if cancel_event and cancel_event.is_set():
+        return report
+
     if options.smooth_iterations > 0:
         from ..meshops.smooth import smooth_mesh
 
@@ -125,6 +134,9 @@ def finish_model(
             f"(volume {sr.volume_change:+.2%}, face count unchanged)"
         )
         report.steps.append("smooth")
+
+    if cancel_event and cancel_event.is_set():
+        return report
 
     if options.needs_gpu and not options.gpu_host:
         report.warnings.append(
@@ -174,9 +186,15 @@ def finish_model(
                 report.warnings.append(f"texturing failed: {exc}")
                 log(f"WARNING: {report.warnings[-1]}")
 
+    if cancel_event and cancel_event.is_set():
+        return report
+
     # Cache SAM labels under out_dir/stages so repeated finishes reuse them.
     effective_cache_dir = Path(cache_dir) if cache_dir is not None else out_dir / "stages"
     parts_objs = _segment(mesh, options, report, log, cache_dir=effective_cache_dir)
+
+    if cancel_event and cancel_event.is_set():
+        return report
 
     if parts_objs:
         from ..parts.export import export_parts
@@ -194,6 +212,9 @@ def finish_model(
 
         if options.web_export:
             _shrink_parts(parts_dir, report, options, log)
+
+    if cancel_event and cancel_event.is_set():
+        return report
 
     if options.web_export:
         from ..meshops.webexport import export_for_web

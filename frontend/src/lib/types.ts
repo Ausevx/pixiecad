@@ -7,11 +7,13 @@
    server genuinely may omit it, not because it was convenient to type.
    ───────────────────────────────────────────────────────────────────────── */
 
-export type JobStatus = "queued" | "running" | "done" | "failed";
+export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
 
-/** Terminal statuses stop all polling for a job. */
+/** Terminal statuses stop all polling for a job. "cancelled" belongs here for
+ *  the same reason as "failed": the job will produce nothing further, and a
+ *  status left out of this set is polled forever. */
 export const isTerminal = (s: JobStatus | string): boolean =>
-  s === "done" || s === "failed";
+  s === "done" || s === "failed" || s === "cancelled";
 
 /** GET /api/jobs — deliberately thin; the list view needs nothing more. */
 export interface JobSummary {

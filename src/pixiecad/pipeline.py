@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+import threading
 import time
 
 import trimesh
@@ -217,6 +218,7 @@ def _run_generative(
     executor: Executor | None = None,
     generative_options: dict | None = None,
     seed: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> BuildResult:
     """Regimes with too few photos to triangulate: invent the geometry instead.
 
@@ -250,6 +252,11 @@ def _run_generative(
     gen_options = _generative_defaults(
         generative_options, spec=spec, solidify_generated=solidify_generated
     )
+    if cancel_event and cancel_event.is_set():
+        stages.append(StageOutcome("generate", "skipped", "cancelled", 0.0))
+        _fill_skipped_stages(stages, ["solidify", "sanity", "scale", "clean", "decimate", "bake", "export"])
+        return BuildResult(regime, stages, None, None, None, warnings)
+
     try:
         result = run_generate(
             GenerateRequest(images=images, options=gen_options, seed=seed),
@@ -299,6 +306,10 @@ def _run_generative(
     # Only when the mesh is actually shattered: Hunyuan already encloses
     # 0.42-0.88 of its hull and is left untouched, verified against real output
     # from both backends.
+    if cancel_event and cancel_event.is_set():
+        _fill_skipped_stages(stages, ["solidify", "sanity", "scale", "clean", "decimate", "bake", "export"])
+        return BuildResult(regime, stages, None, None, None, warnings)
+
     if solidify_generated:
         t_solid = time.monotonic()
         try:
@@ -376,6 +387,10 @@ def _run_generative(
                              time.monotonic() - t_solid)
             )
 
+    if cancel_event and cancel_event.is_set():
+        _fill_skipped_stages(stages, ["sanity", "scale", "clean", "decimate", "bake", "export"])
+        return BuildResult(regime, stages, None, None, None, warnings)
+
     # Structural sanity: a failed generation still yields a valid, correctly
     # budgeted, UV-mapped glTF -- it is just not an object. Every numeric check
     # passed on a mesh that turned out to be a cube of noise, so shape is
@@ -393,6 +408,11 @@ def _run_generative(
     )
     for w in report.warnings:
         warnings.append(f"Generated geometry looks wrong: {w}")
+
+    if cancel_event and cancel_event.is_set():
+        _fill_skipped_stages(stages, ["scale", "clean", "decimate", "bake", "export"])
+        return BuildResult(regime, stages, None, None, None, warnings)
+
     return _mesh_tail(
         mesh,
         mesh,
@@ -408,6 +428,7 @@ def _run_generative(
         split=split,
         max_parts=max_parts,
         object_hint=object_hint,
+        cancel_event=cancel_event,
     )
 
 
@@ -462,6 +483,7 @@ def run_build(
     object_hint: str | None = None,
     generative_options: dict | None = None,
     seed: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> BuildResult:
     """Run the end-to-end PixieCAD pipeline.
 
@@ -526,6 +548,10 @@ def run_build(
             warnings=warnings,
         )
 
+    if cancel_event and cancel_event.is_set():
+        _fill_skipped_stages(stages, ["regime", "sparse", "dense", "scale", "clean", "decimate", "bake", "export"])
+        return BuildResult(regime=Regime.SINGLE_IMAGE, stages=stages, glb_path=None, faces=None, scale_applied=None, warnings=warnings)
+
     # Regime selection
     #
     # Decides reconstruction regime based on the count of usable photos that
@@ -566,6 +592,10 @@ def run_build(
             warnings=warnings,
         )
 
+    if cancel_event and cancel_event.is_set():
+        _fill_skipped_stages(stages, ["sparse", "dense", "scale", "clean", "decimate", "bake", "export"])
+        return BuildResult(regime=regime, stages=stages, glb_path=None, faces=None, scale_applied=None, warnings=warnings)
+
     if regime != Regime.ORBIT:
         warnings.append(
             f"Regime is {regime.value}: photogrammetry needs >=16 well-distributed "
@@ -591,6 +621,7 @@ def run_build(
             executor=executor,
             generative_options=generative_options,
             seed=seed,
+            cancel_event=cancel_event,
         )
 
     # S2a Sparse
@@ -652,6 +683,10 @@ def run_build(
             scale_applied=None,
             warnings=warnings,
         )
+
+    if cancel_event and cancel_event.is_set():
+        _fill_skipped_stages(stages, ["dense", "scale", "clean", "decimate", "bake", "export"])
+        return BuildResult(regime=regime, stages=stages, glb_path=None, faces=None, scale_applied=None, warnings=warnings)
 
     # S2b Dense
     t0 = time.monotonic()
@@ -749,6 +784,7 @@ def run_build(
         split=split,
         max_parts=max_parts,
         object_hint=object_hint,
+        cancel_event=cancel_event,
     )
 
 
@@ -778,6 +814,7 @@ def _mesh_tail(
     split: bool = False,
     max_parts: int = 8,
     object_hint: str | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> BuildResult:
     """Scale -> clean -> decimate -> unwrap/bake -> export.
 
@@ -808,23 +845,9 @@ def _mesh_tail(
             )
         except Exception as e:
             dt = time.monotonic() - t0
-            stages.append(
-                StageOutcome(
-                    name="scale",
-                    status="failed",
-                    detail=str(e),
-                    seconds=dt,
-                )
-            )
+            stages.append(StageOutcome("scale", "failed", str(e), dt))
             _fill_skipped_stages(stages, ["clean", "decimate", "bake", "export"])
-            return BuildResult(
-                regime=regime,
-                stages=stages,
-                glb_path=None,
-                faces=None,
-                scale_applied=None,
-                warnings=warnings,
-            )
+            return BuildResult(regime, stages, None, None, None, warnings)
     else:
         dt = time.monotonic() - t0
         stages.append(
@@ -835,6 +858,13 @@ def _mesh_tail(
                 seconds=dt,
             )
         )
+
+    # Everything below is the heaviest local work in the pipeline — baking a
+    # normal map alone dominates a CPU-only run — so this is the checkpoint that
+    # matters most for a user who has just asked to stop.
+    if cancel_event is not None and cancel_event.is_set():
+        _fill_skipped_stages(stages, ["clean", "decimate", "bake", "export"])
+        return BuildResult(regime, stages, None, None, scale_applied, warnings)
 
     # S4 Clean
     t0 = time.monotonic()

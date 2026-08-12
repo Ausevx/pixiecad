@@ -611,6 +611,7 @@ def create_app(root: Path) -> FastAPI:
         multiview: bool = False,
         seed: int | None = None,
     ) -> None:
+        cancel_event = None
         with lock:
             job = jobs.get(job_id)
             if not job:
@@ -618,6 +619,7 @@ def create_app(root: Path) -> FastAPI:
             job["status"] = "running"
             job["stage"] = "build"
             job["log"].append("Starting full pipeline build...")
+            cancel_event = job.get("cancel_event")
 
         try:
             photos_dir = ws_root / "input"
@@ -673,7 +675,17 @@ def create_app(root: Path) -> FastAPI:
                 object_hint=object_hint,
                 generative_options=generative_options,
                 seed=seed,
+                cancel_event=cancel_event,
             )
+
+            if cancel_event and cancel_event.is_set():
+                with lock:
+                    current = jobs.get(job_id)
+                    if current:
+                        current["status"] = "cancelled"
+                        current["stage"] = "cancelled"
+                        current["log"].append("Job cancelled during build.")
+                return
 
             regime_val = (
                 result.regime.value
@@ -772,6 +784,15 @@ def create_app(root: Path) -> FastAPI:
                     if current:
                         current["stage"] = "finishing"
 
+                if cancel_event and cancel_event.is_set():
+                    with lock:
+                        current = jobs.get(job_id)
+                        if current:
+                            current["status"] = "cancelled"
+                            current["stage"] = "cancelled"
+                            current["log"].append("Job cancelled before finishing.")
+                    return
+
                 photos = sorted(
                     q for q in (ws_root / "input").glob("*")
                     if q.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
@@ -782,7 +803,17 @@ def create_app(root: Path) -> FastAPI:
                     finish,
                     conditioning_image=photos[0] if photos else None,
                     log=_log,
+                    cancel_event=cancel_event,
                 )
+
+                if cancel_event and cancel_event.is_set():
+                    with lock:
+                        current = jobs.get(job_id)
+                        if current:
+                            current["status"] = "cancelled"
+                            current["stage"] = "cancelled"
+                            current["log"].append("Job cancelled during finishing.")
+                    return
                 warnings = list(warnings) + fin.warnings
                 if fin.parts:
                     parts_raw = fin.parts
@@ -846,6 +877,11 @@ def create_app(root: Path) -> FastAPI:
                     job["status"] = "failed"
                     job["stage"] = "failed"
                     job["log"].append(f"Pipeline failed: {exc}")
+        finally:
+            with lock:
+                job = jobs.get(job_id)
+                if job:
+                    job.pop("cancel_event", None)
 
     def _dispatch_when_gpu_ready(
         job_id: str, finish: FinishOptions, worker_args: tuple[Any, ...]
@@ -1135,6 +1171,7 @@ def create_app(root: Path) -> FastAPI:
                 "normal_res": finish.normal_res,
                 "bake_location": finish.bake_location,
             },
+            "cancel_event": threading.Event(),
             "web_url": None,
         }
 
@@ -1430,6 +1467,7 @@ def create_app(root: Path) -> FastAPI:
             "backend": settings.get("backend"),
             "settings": new_settings,
             "finish": dataclasses.asdict(finish),
+            "cancel_event": threading.Event(),
             "web_url": None,
             "rerun_of": job_id,
         }
@@ -1743,6 +1781,22 @@ def create_app(root: Path) -> FastAPI:
         with lock:
             jobs.pop(job_id, None)
         return {"deleted": str(session_dir), "freed_bytes": freed}
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str):
+        with lock:
+            job = jobs.get(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail="job not found")
+
+            status = job.get("status")
+            if status not in ("done", "failed", "cancelled"):
+                cancel_event = job.get("cancel_event")
+                if cancel_event:
+                    cancel_event.set()
+                    job["log"].append("Cancellation requested; stopping at next checkpoint.")
+
+        return get_job(job_id)
 
     @app.post("/api/jobs/{job_id}/convert")
     def convert_job(job_id: str, req: ConvertRequest):

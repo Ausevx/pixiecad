@@ -90,6 +90,14 @@ export const deleteJob = (id: string) =>
     { method: "DELETE" },
   );
 
+/** Requests cancellation; it does not perform it. The job runs in-process and
+ *  can only notice the request between stages, so the returned detail may still
+ *  say "running" — callers must treat this as pending, not done. */
+export const cancelJob = (id: string) =>
+  request<JobDetail>(`/api/jobs/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+  });
+
 export const convertJob = (
   id: string,
   body: { format: string; source?: string; size_mm?: number | null; repair?: boolean },
