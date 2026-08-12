@@ -5,6 +5,7 @@ motion blur or poor exposure, and keeps the sharpest available frame for each
 interval to maximize photogrammetry success.
 """
 
+import json
 import math
 
 import shutil
@@ -21,6 +22,53 @@ from pixiecad.ingest.quality import assess_quality
 OVERSAMPLE = 6
 #: A malformed container can make ffmpeg block forever.
 FFMPEG_TIMEOUT_S = 300
+#: Reading container metadata is near-instant; this only guards a hung probe.
+FFPROBE_TIMEOUT_S = 30
+
+
+def _probe_frame_count(video: Path) -> int | None:
+    """Total frames in the video, or None if ffprobe cannot say.
+
+    Counting exactly (`-count_frames`) decodes the entire clip, which is the
+    cost this module exists to avoid, so this reads the container's own
+    metadata instead and falls back to duration x frame rate.
+    """
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=nb_frames,duration,avg_frame_rate",
+             "-of", "json", str(video)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=FFPROBE_TIMEOUT_S,
+        )
+        streams = json.loads(proc.stdout).get("streams") or []
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
+        return None
+    if not streams:
+        return None
+    stream = streams[0]
+
+    nb_frames = stream.get("nb_frames")
+    if nb_frames not in (None, "N/A"):
+        try:
+            if int(nb_frames) > 0:
+                return int(nb_frames)
+        except (TypeError, ValueError):
+            pass
+
+    # Matroska and fragmented MP4 leave nb_frames unset. Duration x rate is
+    # close enough: the stride only has to land within a frame or two.
+    try:
+        num, _, den = (stream.get("avg_frame_rate") or "").partition("/")
+        fps = float(num) / float(den)
+        n = int(float(stream["duration"]) * fps)
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+    return n if n > 0 else None
 
 
 class InadequateVideoError(Exception):
@@ -64,13 +112,26 @@ def extract_frames(video: Path, out_dir: Path, *, target: int = 32) -> list[Path
         # from how many frames the caller asked for -- which was the bug:
         # `target` controlled both, so the same video reported a different
         # number of "usable" frames depending on how many were requested.
+        #
+        # Sample by STRIDE across the whole clip, never by an output cap.
+        # `thumbnail=3` plus `-frames:v 192` looked equivalent and was not:
+        # thumbnail emits one frame per batch of 3, and -frames:v stops ffmpeg
+        # once 192 are written, so decoding ended at input frame ~576. A 30s
+        # 60fps orbit was read over its first 9.6s only -- about 120 degrees of
+        # arc -- and the buckets below then spread themselves evenly over that
+        # truncated prefix while reporting full coverage. Reconstruction from a
+        # third of an orbit fails, with nothing pointing back to ingest.
+        n_frames = _probe_frame_count(video)
+        # Probe failure keeps every frame: decoding too much is slow, whereas a
+        # guessed stride silently crops the orbit again.
+        stride = max(1, n_frames // (target * OVERSAMPLE)) if n_frames else 1
         cmd = [
             "ffmpeg",
             "-nostdin",
             "-i", str(video),
-            "-vf", f"thumbnail={max(1, OVERSAMPLE // 2)}",
+            # The comma is escaped because ffmpeg splits filters on it.
+            "-vf", f"select=not(mod(n\\,{stride}))",
             "-vsync", "vfr",
-            "-frames:v", str(target * OVERSAMPLE),
             "-q:v", "2",
             str(tmp_path / "frame_%05d.jpg")
         ]
@@ -114,12 +175,6 @@ def extract_frames(video: Path, out_dir: Path, *, target: int = 32) -> list[Path
                 buckets.append(all_frames[start:end])
 
         usable_frames = []
-        # Frames that PASSED quality, across every bucket. The old code
-        # reported the number of surviving buckets, which is capped at
-        # `target` -- so a flawless 60-frame clip asked for 15 frames replied
-        # "only 15 usable frames survived quality checks". It named a limit of
-        # its own sampling grid as a fault in the user's footage.
-        n_passed = 0
         for i, bucket in enumerate(buckets):
             best_frame = None
             best_score = -1.0
@@ -131,11 +186,9 @@ def extract_frames(video: Path, out_dir: Path, *, target: int = 32) -> list[Path
 
                 res = assess_quality(img)
                 # Keep the sharpest frame that passes all quality checks.
-                if res.ok:
-                    n_passed += 1
-                    if res.blur_score > best_score:
-                        best_score = res.blur_score
-                        best_frame = frame_path
+                if res.ok and res.blur_score > best_score:
+                    best_score = res.blur_score
+                    best_frame = frame_path
 
             if best_frame is not None:
                 dst = out_dir / f"frame_{i:04d}.jpg"
@@ -149,6 +202,10 @@ def extract_frames(video: Path, out_dir: Path, *, target: int = 32) -> list[Path
     if not usable_frames:
         raise InadequateVideoError(
             0, [],
+            # Candidates examined, NOT surviving buckets. Reporting buckets is
+            # capped at `target`, so a flawless 60-frame clip asked for 15
+            # frames replied "only 15 usable frames survived quality checks" --
+            # naming a limit of its own sampling grid as a fault in the footage.
             f"No frames in {video} passed the quality checks "
             f"({n_candidates} candidates examined): too blurry, too dark, or "
             "below the minimum resolution."
