@@ -8,7 +8,6 @@ or **generate** a plausible model from a few photos, real or AI-made.
 
 ```
 pixiecad/
-├── CLAUDE.md              dev-machine constraints: 16GB memory limit, no git remote
 ├── PLAN.md                architecture notes / design log
 ├── pyproject.toml         deps, package config
 ├── scripts/
@@ -115,6 +114,42 @@ jobs can never share or overwrite each other's photos and meshes. `GET
 Options: `--port 8080`, `--host 0.0.0.0` (to reach it from another device on
 your network), `--root <dir>` (where session folders are stored, default
 `jobs/`).
+
+### Themes
+
+Six themes, reachable from the picker in the header: `dark` (amber on
+near-black, the default), `light` (warm paper), `midnight` (cool blue-black),
+`nord`, `sepia`, and `contrast` (WCAG AAA). A seventh choice, `system`, follows
+the OS and keeps following it.
+
+The whole visual system is CSS custom properties. `frontend/src/styles.css`
+declares a `--px-*` set per theme, and an `@theme inline` block maps those to
+Tailwind utilities — so a theme is defined entirely by its variables, and no
+component carries a colour. The picker stores the choice in `localStorage` under
+`pixiecad.theme` and stamps it on `<html>` as `data-theme`; `system` *removes*
+the attribute, which is what lets the `prefers-color-scheme` media query take
+over.
+
+To add a theme:
+
+1. Add a `:root[data-theme="<id>"]` block to `styles.css` setting **all 24**
+   `--px-*` and `--field-*` variables plus `color-scheme`. Set every one — a
+   missing variable silently inherits the dark theme's value and produces an
+   unreadable mix rather than an obvious break.
+2. Add an entry to `THEMES` in `frontend/src/lib/theme.ts` with its `id`,
+   `label`, `base` (`light` or `dark`), and `swatch` — the swatch duplicates
+   that theme's `--px-accent`, because the picker paints swatches for themes
+   that are not currently applied and so cannot read the variable off `:root`.
+
+Two `<canvas>` components (the background field and the logo) paint their own
+pixels and cannot use the variables directly. Both observe the `data-theme`
+attribute and re-read the palette on change, so they need no edit per theme —
+but `--field-line` and `--field-point` must be real colour values, not
+`transparent` or `currentColor`.
+
+Contrast is a requirement, not a preference: ink clears 7:1 on both grounds and
+accents clear 4.5:1, since the accent is used for text and links. The
+`contrast` theme holds ink to 15:1.
 
 ## CLI reference
 

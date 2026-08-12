@@ -12,7 +12,12 @@ demo_ws/
 .beads-credential-key
 .agy-worktrees/
 ws-*/
+
+# Agent instruction files. Local guidance for whoever is driving an assistant
+# here; nothing a clone of this project needs. .beads/ is deliberately NOT in
+# this list — it holds the issue tracker's data, which is project history.
 AGENTS.md
+CLAUDE.md
 .claude/
 
 # per-run session folders
