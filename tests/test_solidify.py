@@ -12,6 +12,7 @@ at about 4 GB, and this suite has to run on a 16 GB laptop.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import trimesh
 
 from pixiecad.meshops.solidify import (
@@ -231,6 +232,7 @@ class TestResolutionIsIndependentOfTheBudget:
         assert "short of the" in src and "voxel" in src
 
 
+@pytest.mark.slow
 class TestDilationEscalatesInsteadOfGuessing:
     """Dilation is both what seals the mesh and what destroys its detail.
 

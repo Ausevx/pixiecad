@@ -103,6 +103,7 @@ def _mean_levels(frames: list[Path]) -> list[float]:
     return [float(_cv2.imread(str(f)).mean()) for f in frames]
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not _HAVE_FFMPEG, reason="ffmpeg not installed")
 def test_frames_span_the_whole_clip(tmp_path):
     """The criterion that matters, and the one the original tests could not
@@ -165,6 +166,7 @@ def test_a_long_clip_is_sampled_all_the_way_to_its_end(tmp_path):
     )
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not _HAVE_FFMPEG, reason="ffmpeg not installed")
 def test_frames_are_in_temporal_order(tmp_path):
     """Monotonic brightness means monotonic time, so this also catches a
@@ -174,6 +176,7 @@ def test_frames_are_in_temporal_order(tmp_path):
     assert levels == sorted(levels), "frames are not in capture order"
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not _HAVE_FFMPEG, reason="ffmpeg not installed")
 def test_a_small_target_is_honoured(tmp_path):
     """A caller asking for 12 has said 12 is enough. A hardcoded 16 made
@@ -185,6 +188,7 @@ def test_a_small_target_is_honoured(tmp_path):
         assert len(got) == target, f"asked for {target}, got {len(got)}"
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not _HAVE_FFMPEG, reason="ffmpeg not installed")
 def test_a_rerun_does_not_leave_the_previous_run_behind(tmp_path):
     """Output names are positional, so a shorter run would leave the tail of a

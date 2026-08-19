@@ -4,6 +4,101 @@ Turn photos of an object into a 3D model with a polygon budget you control.
 Works two ways: **measure** a real object from many photos (photogrammetry),
 or **generate** a plausible model from a few photos, real or AI-made.
 
+## Install
+
+Python 3.11+. Nothing here needs a GPU, a cloud account, or an API key to
+install or to run the test suite.
+
+```bash
+git clone https://github.com/Ausevx/pixiecad.git
+cd pixiecad
+python3 -m venv .venv
+.venv/bin/pip install -e ".[mesh,sfm,web,dev]"
+```
+
+The extras are separable, because most people do not want all of it:
+
+| Extra | Brings | Needed for |
+|---|---|---|
+| *(base)* | numpy, pillow, opencv, pydantic, typer | ingest, scale, the CLI |
+| `mesh` | trimesh, pyfqmr, xatlas, rtree, scipy, scikit-image | cleanup, decimate, UV/bake, drawings — the finishing half of the pipeline |
+| `sfm` | pycolmap | sparse reconstruction (S2a), CPU-only |
+| `web` | fastapi, uvicorn | the dashboard (`pixiecad serve`) |
+| `bgremoval` | rembg | optional background removal on input photos |
+| `dev` | pytest | the test suite |
+
+Then, with no GPU and no network:
+
+```bash
+.venv/bin/pixiecad run images/ --label "demo" --faces 20000 --backend fake
+```
+
+`--backend fake` substitutes a placeholder mesh for the generative stage, so
+the whole pipeline runs end to end locally. It proves the install; it does not
+produce a real model.
+
+## What you actually need
+
+The pipeline splits cleanly into what runs on any laptop and what does not.
+
+| Stage | Runs where | Requires |
+|---|---|---|
+| S0 ingest, S1 scale | Local | nothing beyond the base install |
+| S2a sparse (poses + point cloud) | Local, CPU | `sfm` extra (pycolmap) |
+| **S2b dense stereo** | **GPU host** | CUDA GPU ≥16 GB, Docker, COLMAP image |
+| **S3 generative (image→mesh)** | **GPU host** | CUDA GPU ≥24 GB running Hunyuan3D or TRELLIS |
+| S4 cleanup → S6 decimate/bake → S7 drawings | Local | `mesh` extra |
+| S0.5 vision triage / part naming | Local | optional; works with **no** API key |
+| Dashboard | Local | `web` extra |
+
+The two GPU stages are the only hard external requirement, and they are reached
+over plain SSH — see [Remote GPU setup](#remote-gpu-setup). Everything else is
+your machine.
+
+## Caveats, and what is specific to the author's setup
+
+This project was built against one particular rig. Those choices are visible in
+the repo, and none of them are load-bearing — but you should know which is
+which before assuming something is required.
+
+**GCP is a convenience, not a dependency.** `scripts/provision_gpu_vm.sh`,
+`pixiecad cloud`, and the dashboard's compute drawer all shell out to `gcloud`,
+because that is what the author rents GPUs from. None of it is on the critical
+path. The pipeline's actual interface to a GPU is an **SSH alias** — anything
+you can `ssh` into with a CUDA GPU and Docker works identically, whether that is
+RunPod, Lambda, a university cluster, or a box under your desk:
+
+```bash
+pixiecad run images/ --host my-gpu-box     # any Host in ~/.ssh/config
+```
+
+Everything GCP-flavoured degrades rather than breaks. `pixiecad cloud` prints
+`gcloud: not installed` and exits; the dashboard's compute panel reports
+`available: false` and the rest of the UI works normally. `cloud.py` is imported
+lazily at each call site — the `cloud` command and the dashboard's compute
+endpoints — so nothing imports it unless you ask for it.
+
+If you are not on GCP, ignore `scripts/*.sh` and the compute drawer entirely.
+
+**Self-hosted models, by choice.** The generative backends are self-hosted
+(Hunyuan3D, TRELLIS) rather than a hosted API. A fal.ai backend existed briefly
+and was deliberately removed: it would have uploaded the user's photos off the
+machine, which defeats the point. The consequence is that there is no zero-setup
+generative path — you need a GPU host, or `--backend fake`.
+
+**TRELLIS needs a HuggingFace token** for a gated dependency. Hunyuan3D does
+not, which is why it is tried first. See [Remote GPU setup](#remote-gpu-setup).
+
+**Generative output is not deterministic and not measured.** The photogrammetry
+path reconstructs a real object and its dimensions mean something. The
+generative path invents unseen surfaces; quality varies run to run, and the
+output metadata flags which surfaces were invented. Do not treat a generative
+result as a measurement.
+
+**Developed on macOS against Linux GPU hosts.** The local half is pure Python
+and portable; the remote half assumes a Linux host with Docker and the NVIDIA
+container runtime. Windows is untested.
+
 ## Project structure
 
 ```
@@ -95,7 +190,7 @@ needs is inside its own folder — `work/` can be deleted afterwards and
 ## Starting the dashboard
 
 ```bash
-cd /Users/aditya/pixiecad
+cd pixiecad
 .venv/bin/pixiecad serve
 ```
 
@@ -165,7 +260,7 @@ pixiecad ingest      S0 alone — score/dedupe/downscale a photo folder
 pixiecad triage      S0.5 — coverage report before you commit to reconstructing
 pixiecad sparse      S2a alone — camera poses + point cloud (needs pycolmap)
 pixiecad build       the whole pipeline: photos in, budgeted .glb out
-                        --backend fal|trellis-remote|fake   generative backend
+                        --backend hunyuan-remote|trellis-remote|fake
                         --split --object "..."              also export parts
                         --host <ssh-alias>                   use a remote GPU for dense
 pixiecad optimize    S4→S6 alone, given an existing dense mesh
@@ -181,9 +276,26 @@ Run any command with `--help` for its full option list.
 
 ## Remote GPU setup
 
-Dense reconstruction (S2b) and the self-hosted generative backend need a CUDA
-GPU with ≥16GB (dense) or ≥24GB (TRELLIS). This machine has neither, so those
-stages run on a rented host over SSH:
+Dense reconstruction (S2b) and the self-hosted generative backends need a CUDA
+GPU with ≥16 GB (dense) or ≥24 GB (TRELLIS). If your machine has one, it is used
+directly. If not, those stages run on another host over SSH.
+
+**The interface is an SSH alias — nothing more.** Any host you can reach with a
+CUDA GPU, Docker, and the NVIDIA container runtime works:
+
+```bash
+pixiecad probe --host my-gpu-box     # confirm the GPU is visible
+pixiecad run images/ --host my-gpu-box
+```
+
+`my-gpu-box` is any `Host` entry in your `~/.ssh/config`. PixieCAD rsyncs the
+work in, runs the stage in a container, and copies the result back. It does not
+care who rents you the box.
+
+### Provisioning on GCP (optional)
+
+The author rents from GCP, so the repo carries scripts for it. **Skip this
+section entirely if you have a GPU elsewhere** — nothing below is required.
 
 ```bash
 # dense photogrammetry (S2b) — a T4 is plenty
@@ -193,13 +305,13 @@ stages run on a rented host over SSH:
 # only, so a T4 cannot launch its kernels no matter how much VRAM it reports
 ./scripts/provision_gpu_vm.sh pixiecad-l4 asia-south1-a l4 trellis
 
-pixiecad probe --host pixiecad-l4.asia-south1-a.<project-id>
 pixiecad run images/ --host pixiecad-l4.asia-south1-a.<project-id>
 ```
 
 The script installs Docker + the NVIDIA container runtime and pre-pulls the
 image for the chosen workload; teardown is
-`gcloud compute instances delete <name> --zone=<zone>`.
+`gcloud compute instances delete <name> --zone=<zone>`. `PIXIECAD_GCP_PROJECT`
+overrides the project id if it differs from your `gcloud config`.
 
 **TRELLIS.2 needs a HuggingFace token.** It depends on
 `facebook/dinov3-vitl16-pretrain-lvd1689m`, a gated repo, so before the first
@@ -226,7 +338,35 @@ never lost work, because every stage is cached by content hash.
 ## Tests
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
+.venv/bin/python -m pytest -q
 ```
 
-172 tests, ~2 seconds, fully offline — no GPU, no network, no API keys.
+599 tests in about 90 seconds, fully offline — no GPU, no network, no API keys,
+no credentials of any kind. That is the whole point of the `fake` backend and
+the recorded fixtures: the suite must pass on a clean clone.
+
+Two marker-gated tiers are excluded by default, configured in `pyproject.toml`:
+
+```bash
+.venv/bin/python -m pytest -q -m slow      # heavy: voxel repair, ffmpeg encodes
+.venv/bin/python -m pytest -q -m ""        # everything, ~140s
+```
+
+`slow` holds the tests that build real video with `ffmpeg` or run voxel
+dilate/fill/erode at two resolutions — genuinely heavy work rather than
+incidentally sluggish tests. `network` holds anything needing the outside world;
+nothing in the default run touches it.
+
+The suite is not fast, and the honest reason is that a lot of it is integration
+rather than unit work — the dashboard's endpoints and the mesh-repair
+escalation ladder are tested by actually running them. If you are iterating on
+one area, a targeted run is fast — `pytest -q tests/test_decimate.py
+tests/test_cleanup.py` is 18 tests in 0.6s.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+The sample photos in `images/` are AI-generated test fixtures, included so the
+pipeline has something to chew on out of the box. They depict no real object and
+carry no third-party rights.

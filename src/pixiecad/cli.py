@@ -173,7 +173,7 @@ def build(
     bake: bool = typer.Option(True, help="Bake a normal map from the dense mesh"),
     normal_res: int = typer.Option(1024, help="Normal map resolution (px)"),
     backend: str = typer.Option(
-        None, help="Generative backend for <16 photos (fal | trellis-remote | fake)"
+        None, help="Generative backend for <16 photos (hunyuan-remote | trellis-remote | fake)"
     ),
     split: bool = typer.Option(False, "--split", help="Also export named parts"),
     max_parts: int = typer.Option(8, help="Maximum number of parts when splitting"),
@@ -225,7 +225,7 @@ def run(
     width: str = typer.Option(None, help="Real width, e.g. '2.0m'"),
     height: str = typer.Option(None, help="Real height, e.g. '0.95m'"),
     host: str = typer.Option(None, help="SSH host for GPU stages (dense and/or generative)"),
-    backend: str = typer.Option(None, help="Generative backend (trellis-remote | fal | fake)"),
+    backend: str = typer.Option(None, help="Generative backend (hunyuan-remote | trellis-remote | fake)"),
     bake: bool = typer.Option(True, help="Bake a normal map"),
     normal_res: int = typer.Option(1024, help="Normal map resolution (px)"),
     split: bool = typer.Option(True, "--split/--no-split", help="Also export named parts"),
