@@ -1,6 +1,6 @@
 import type React from "react";
 import { useState, useRef, useEffect, useLayoutEffect, useId, useCallback } from 'react';
-import { motion } from 'framer-motion';
+import { motion } from 'motion/react';
 import { signatures } from '@/lib/motion';
 import { useReducedMotion } from '@/lib/hooks';
 import { formatCount } from '@/lib/api';

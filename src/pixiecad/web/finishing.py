@@ -340,9 +340,12 @@ def _segment(
 def _shrink_parts(parts_dir: Path, report: FinishReport, options: FinishOptions, log) -> None:
     """Re-export each part with a texture sized to its share of the model.
 
-    Without this a 273-face wing element ships the same 2048x2048 atlas as the
-    whole body: nine parts came to 62 MB for ~20k triangles. Scaling per part
-    brings the same set to about 2 MB.
+    ``parts.export`` already repacks each part's UVs into a tight texture at
+    export time (using the face budget as the proxy for share).  This pass runs
+    *after* decimation, so it uses the actual post-decimation face counts and
+    the user's ``texture_size`` setting to do a final web-sized downscale.  The
+    two passes are complementary, not duplicates: the earlier one controls UV
+    density; this one controls the JPEG/PNG resolution shipped to the browser.
     """
     from ..meshops.webexport import export_for_web, part_texture_size
 

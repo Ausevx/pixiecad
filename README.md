@@ -106,7 +106,13 @@ pixiecad/
 ├── PLAN.md                architecture notes / design log
 ├── pyproject.toml         deps, package config
 ├── scripts/
-│   └── provision_gpu_vm.sh   stand up a GCP GPU VM for dense/generative stages
+│   ├── provision_gpu_vm.sh   stand up a GCP GPU VM for dense/generative stages
+│   ├── bake_image.sh          bake a custom GCP machine image with pre-pulled weights
+│   ├── launch_from_image.sh   launch a VM from a baked image
+│   ├── gcp_status.sh          check running instances and spend
+│   ├── setup_hunyuan_vm.sh    set up Hunyuan3D on a GPU VM
+│   ├── setup_hunyuan_texture.sh  set up Hunyuan texture worker
+│   └── setup_sam_vm.sh        set up SAM segmentation worker
 ├── images/                sample F1 test set (generated, for pipeline testing)
 ├── runs/                  one folder per headless run (gitignored, see below)
 ├── src/pixiecad/
